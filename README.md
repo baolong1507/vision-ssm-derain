@@ -18,8 +18,10 @@ Describe your key modules: hybrid spatial-frequency, SSM blocks, etc.
 ## Results
 | Dataset | PSNR ↑ | SSIM ↑ |
 |---|---:|---:|
+| Rain200L |  |  |
 | Rain200H |  |  |
 | Rain1400 |  |  |
+| DID-Data |  |  |
 
 Qualitative examples are in `results/qualitative/`.
 
