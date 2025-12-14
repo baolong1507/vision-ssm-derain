@@ -1,0 +1,10 @@
+torch>=2.1
+torchvision>=0.16
+pytorch-lightning>=2.1
+omegaconf>=2.3
+opencv-python>=4.8
+numpy>=1.24
+Pillow>=10.0
+tqdm>=4.66
+matplotlib>=3.7
+scikit-image>=0.21

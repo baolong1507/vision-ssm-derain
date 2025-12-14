@@ -1,0 +1,25 @@
+phase: "phase1"
+seed: 42
+
+train:
+  max_epochs: 50
+  batch_size: 12
+  lr: 2e-4
+  weight_decay: 1e-5
+  precision: "16-mixed"
+  grad_clip: 1.0
+  log_every_n_steps: 20
+
+loss:
+  w_l1: 1.0
+  w_ssim: 0.0
+  w_fft: 0.0
+
+model:
+  name: "unet_baseline"
+  base_ch: 48
+
+output:
+  exp_name: "phase1_baseline_unet"
+  ckpt_dir: "outputs/phase1/checkpoints"
+  result_dir: "outputs/phase1/results"

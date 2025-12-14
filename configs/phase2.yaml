@@ -1,0 +1,26 @@
+phase: "phase2"
+seed: 42
+
+train:
+  max_epochs: 60
+  batch_size: 10
+  lr: 2e-4
+  weight_decay: 1e-5
+  precision: "16-mixed"
+  grad_clip: 1.0
+  log_every_n_steps: 20
+
+loss:
+  w_l1: 1.0
+  w_ssim: 0.2
+  w_fft: 0.1
+
+model:
+  name: "fess_unet"
+  base_ch: 48
+  freq_ch: 16
+
+output:
+  exp_name: "phase2_fess_unet"
+  ckpt_dir: "outputs/phase2/checkpoints"
+  result_dir: "outputs/phase2/results"

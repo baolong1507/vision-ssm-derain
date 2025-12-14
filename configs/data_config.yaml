@@ -1,0 +1,21 @@
+data_root: "/content/drive/MyDrive/derain_project/data"   
+
+datasets:
+  - Rain200L
+  - Rain200H
+  - Rain1400
+  - DID-Data
+
+subdirs:
+  inp: "input"
+  gt: "target"
+  train: "train"
+  val: "val"
+  test: "test"
+  rain: "rain"
+
+img_size: 256
+crop_size: 256
+
+num_workers: 8
+pin_memory: true
