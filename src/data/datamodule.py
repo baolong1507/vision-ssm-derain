@@ -22,7 +22,7 @@ class DerainDataModule:
         val_dir = root / sub["val"] / sub["inp"]
         return val_dir.exists()
 
-    def _make_one(self, dataset_name: str, split_key: str, transform):
+    def _make_one(self, dataset_name: str, split_key: str, tfms):
         root = Path(self.dcfg["data_root"]) / dataset_name
         sub = self.dcfg["subdirs"]
         split = sub[split_key]
@@ -32,40 +32,64 @@ class DerainDataModule:
 
         sig = inspect.signature(PairedDerainDataset.__init__).parameters
 
-        # Case A: dataset class mới dùng inp_dir/gt_dir
+        kwargs = {}
+
+        # root style: some code uses roots=[...]
+        if "roots" in sig:
+            kwargs["roots"] = [str(root)]
+        elif "root" in sig:
+            kwargs["root"] = root
+        else:
+            # fallback (rare)
+            kwargs["root"] = root
+
+        # split / mode
+        if "split" in sig:
+            kwargs["split"] = split
+        elif "mode" in sig:
+            kwargs["mode"] = split
+        elif "phase" in sig:
+            kwargs["phase"] = split
+
+        # input / gt dir naming
         if "inp_dir" in sig:
-            return PairedDerainDataset(
-                root=root,
-                split=split,
-                inp_dir=inp,
-                gt_dir=gt,
-                transform=transform,
-                dataset_name=dataset_name,
-            )
-
-        # Case B: dataset class cũ dùng rain_dir/gt_dir
+            kwargs["inp_dir"] = inp
         if "rain_dir" in sig:
-            return PairedDerainDataset(
-                root=root,
-                split=split,
-                rain_dir=inp,      # input folder
-                gt_dir=gt,
-                transform=transform,
-                dataset_name=dataset_name,
-            )
-
-        # Case C: dataset class cũ hơn nữa dùng input_dir/target_dir
+            kwargs["rain_dir"] = inp
         if "input_dir" in sig:
-            return PairedDerainDataset(
-                root=root,
-                split=split,
-                input_dir=inp,
-                target_dir=gt,
-                transform=transform,
-                dataset_name=dataset_name,
-            )
+            kwargs["input_dir"] = inp
 
-        raise TypeError(f"Unsupported PairedDerainDataset signature: {list(sig.keys())}")
+        if "gt_dir" in sig:
+            kwargs["gt_dir"] = gt
+        if "target_dir" in sig:
+            kwargs["target_dir"] = gt
+
+        # transforms naming (transform / tfms / transforms)
+        if "transform" in sig:
+            kwargs["transform"] = tfms
+        elif "tfms" in sig:
+            kwargs["tfms"] = tfms
+        elif "transforms" in sig:
+            kwargs["transforms"] = tfms
+
+        # train flags (if supported)
+        if "shuffle" in sig:
+            kwargs["shuffle"] = (split_key == "train")
+        if "is_train" in sig:
+            kwargs["is_train"] = (split_key == "train")
+        if "train" in sig:
+            kwargs["train"] = (split_key == "train")
+
+        # optional dataset name (if supported)
+        if "dataset_name" in sig:
+            kwargs["dataset_name"] = dataset_name
+        if "name" in sig:
+            kwargs["name"] = dataset_name
+
+        # IMPORTANT: filter out anything not in signature (extra safety)
+        kwargs = {k: v for k, v in kwargs.items() if k in sig}
+
+        return PairedDerainDataset(**kwargs)
 
     def setup(self, train_tfms, val_tfms):
         auto_split = bool(self.tcfg.get("auto_split_val", True))
