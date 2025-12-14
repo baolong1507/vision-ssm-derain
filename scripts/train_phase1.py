@@ -8,6 +8,8 @@ from src.utils.io import ensure_dir
 from src.data.transforms_albu import build_transforms
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import ModelCheckpoint
+import torch
+torch.set_float32_matmul_precision("high")
 
 def main(cfg_path, data_cfg_path):
     cfg = OmegaConf.load(cfg_path)

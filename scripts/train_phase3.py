@@ -8,6 +8,8 @@ from src.lit_module import LitDerain
 from src.utils.io import ensure_dir
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import ModelCheckpoint
+import torch
+torch.set_float32_matmul_precision("high")
 
 def main(cfg_path, data_cfg_path):
     cfg = OmegaConf.load(cfg_path)

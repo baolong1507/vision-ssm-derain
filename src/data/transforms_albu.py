@@ -20,7 +20,7 @@ def build_transforms(img_size: int, crop_size: int, is_train: bool):
         ]
 
     aug += [
-        A.Normalize((0.5,)*3, (0.5,)*3),
+        A.Normalize((0.0, 0.0, 0.0), (1.0, 1.0, 1.0)),
         ToTensorV2(),
     ]
 
