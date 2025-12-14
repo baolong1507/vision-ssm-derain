@@ -1,5 +1,6 @@
 from pathlib import Path
 import torch
+import inspect
 from torch.utils.data import DataLoader, ConcatDataset, random_split
 from .datasets import PairedDerainDataset
 
@@ -25,14 +26,46 @@ class DerainDataModule:
         root = Path(self.dcfg["data_root"]) / dataset_name
         sub = self.dcfg["subdirs"]
         split = sub[split_key]
-        return PairedDerainDataset(
-            root=root,
-            split=split,
-            inp_dir=sub["inp"],
-            gt_dir=sub["gt"],
-            transform=transform,
-            dataset_name=dataset_name,
-        )
+
+        inp = sub.get("inp", sub.get("rain", "input"))
+        gt  = sub.get("gt", "target")
+
+        sig = inspect.signature(PairedDerainDataset.__init__).parameters
+
+        # Case A: dataset class mới dùng inp_dir/gt_dir
+        if "inp_dir" in sig:
+            return PairedDerainDataset(
+                root=root,
+                split=split,
+                inp_dir=inp,
+                gt_dir=gt,
+                transform=transform,
+                dataset_name=dataset_name,
+            )
+
+        # Case B: dataset class cũ dùng rain_dir/gt_dir
+        if "rain_dir" in sig:
+            return PairedDerainDataset(
+                root=root,
+                split=split,
+                rain_dir=inp,      # input folder
+                gt_dir=gt,
+                transform=transform,
+                dataset_name=dataset_name,
+            )
+
+        # Case C: dataset class cũ hơn nữa dùng input_dir/target_dir
+        if "input_dir" in sig:
+            return PairedDerainDataset(
+                root=root,
+                split=split,
+                input_dir=inp,
+                target_dir=gt,
+                transform=transform,
+                dataset_name=dataset_name,
+            )
+
+        raise TypeError(f"Unsupported PairedDerainDataset signature: {list(sig.keys())}")
 
     def setup(self, train_tfms, val_tfms):
         auto_split = bool(self.tcfg.get("auto_split_val", True))
