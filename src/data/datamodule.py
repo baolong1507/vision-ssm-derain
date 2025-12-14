@@ -3,6 +3,7 @@ import torch
 import inspect
 from torch.utils.data import DataLoader, ConcatDataset, random_split
 from .datasets import PairedDerainDataset
+from torch.utils.data import Subset
 
 class DerainDataModule:
     def __init__(self, data_cfg: dict, train_cfg: dict):
@@ -112,12 +113,22 @@ class DerainDataModule:
                 continue
 
             # nếu không có val -> random split
-            n = len(full_train)
+            base = self._make_one(name, "train", tfms=None)
+            n = len(base)
             n_val = max(1, int(val_ratio * n))
-            n_train = n - n_val
-            train_sub, val_sub = random_split(full_train, [n_train, n_val], generator=g)
-            train_sets.append(train_sub)
-            val_sets.append(val_sub)
+
+            # 2) split indices (seed cố định)
+            idx = torch.randperm(n, generator=g).tolist()
+            val_idx = idx[:n_val]
+            train_idx = idx[n_val:]
+
+            # 3) tạo 2 dataset thật với transform khác nhau
+            train_full = self._make_one(name, "train", train_tfms)
+            val_full   = self._make_one(name, "train", val_tfms)
+
+            train_sets.append(Subset(train_full, train_idx))
+            val_sets.append(Subset(val_full, val_idx))
+
             print(f"[{name}] Auto-split: val={n_val}/{n} (seed={split_seed})")
 
         self.train_ds = ConcatDataset(train_sets) if len(train_sets) > 1 else train_sets[0]
