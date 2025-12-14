@@ -1,9 +1,38 @@
+from typing import List, Dict, Tuple, Optional
 from pathlib import Path
 from PIL import Image
+import re
+import cv2
 import numpy as np
 import torch
 from torch.utils.data import Dataset
 from .transforms import to_numpy, random_crop_pair, hflip_pair
+
+def canonical_stem(st: str) -> str:
+    """
+    Chuẩn hóa tên file để ghép cặp:
+    - Rain1400: '1_1'..'1_14' -> key '1', '1_clean' -> key '1'
+    - Các bộ khác: bỏ hậu tố _rain/_rainy/_clean nếu có.
+    """
+    m = re.match(r'^(\d+)_\d{1,2}$', st)
+    if m:
+        return m.group(1)
+    st = re.sub(r'_(rain|rainy|clean)$', '', st, flags=re.IGNORECASE)
+    return st
+
+def _list_imgs(p: Path) -> List[Path]:
+    exts = (".png", ".jpg", ".jpeg", ".bmp")
+    files = []
+    for e in exts:
+        files += list(p.glob(f"*{e}"))
+    return sorted(files)
+
+def _read_rgb(fp: Path) -> np.ndarray:
+    img = cv2.imread(str(fp), cv2.IMREAD_COLOR)
+    if img is None:
+        raise FileNotFoundError(f"Cannot read: {fp}")
+    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    return img
 
 class PairedDerainDataset(Dataset):
     def __init__(self, root: str | Path, split: str, rain_dir="rain", gt_dir="gt",

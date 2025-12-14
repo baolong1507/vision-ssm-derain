@@ -1,38 +1,93 @@
 from pathlib import Path
-from torch.utils.data import DataLoader, ConcatDataset
+import torch
+from torch.utils.data import DataLoader, ConcatDataset, random_split
 from .datasets import PairedDerainDataset
 
 class DerainDataModule:
-    def __init__(self, data_cfg: dict, batch_size: int):
-        self.cfg = data_cfg
-        self.batch_size = batch_size
+    def __init__(self, data_cfg: dict, train_cfg: dict):
+        """
+        data_cfg: từ configs/data_config.yaml
+        train_cfg: từ phase*.yaml (batch_size, val_ratio, split_seed, auto_split_val, ...)
+        """
+        self.dcfg = data_cfg
+        self.tcfg = train_cfg
 
-    def _ds_one(self, dataset_name: str, split_key: str, train: bool):
-        root = Path(self.cfg["data_root"]) / dataset_name
-        sub = self.cfg["subdirs"]
+        self.train_ds = None
+        self.val_ds = None
+
+    def _has_val_folder(self, dataset_name: str) -> bool:
+        root = Path(self.dcfg["data_root"]) / dataset_name
+        sub = self.dcfg["subdirs"]
+        val_dir = root / sub["val"] / sub["inp"]
+        return val_dir.exists()
+
+    def _make_one(self, dataset_name: str, split_key: str, transform):
+        root = Path(self.dcfg["data_root"]) / dataset_name
+        sub = self.dcfg["subdirs"]
         split = sub[split_key]
         return PairedDerainDataset(
             root=root,
             split=split,
-            rain_dir=sub["rain"],
+            inp_dir=sub["inp"],
             gt_dir=sub["gt"],
-            crop_size=self.cfg["crop_size"],
-            train=train,
+            transform=transform,
+            dataset_name=dataset_name,
         )
 
+    def setup(self, train_tfms, val_tfms):
+        auto_split = bool(self.tcfg.get("auto_split_val", True))
+        val_ratio  = float(self.tcfg.get("val_ratio", 0.1))
+        split_seed = int(self.tcfg.get("split_seed", 42))
+
+        train_sets, val_sets = [], []
+        g = torch.Generator().manual_seed(split_seed)
+
+        for name in self.dcfg["datasets"]:
+            # luôn tạo full train
+            full_train = self._make_one(name, "train", train_tfms)
+
+            # nếu có val folder thật -> dùng
+            if self._has_val_folder(name) and not auto_split:
+                val_ds = self._make_one(name, "val", val_tfms)
+                train_sets.append(full_train)
+                val_sets.append(val_ds)
+                print(f"[{name}] Using existing val folder.")
+                continue
+
+            # nếu không có val -> random split
+            n = len(full_train)
+            n_val = max(1, int(val_ratio * n))
+            n_train = n - n_val
+            train_sub, val_sub = random_split(full_train, [n_train, n_val], generator=g)
+            train_sets.append(train_sub)
+            val_sets.append(val_sub)
+            print(f"[{name}] Auto-split: val={n_val}/{n} (seed={split_seed})")
+
+        self.train_ds = ConcatDataset(train_sets) if len(train_sets) > 1 else train_sets[0]
+        self.val_ds   = ConcatDataset(val_sets)   if len(val_sets) > 1 else val_sets[0]
+
     def train_loader(self):
-        dss = [self._ds_one(d, "train", True) for d in self.cfg["datasets"]]
-        ds = ConcatDataset(dss) if len(dss) > 1 else dss[0]
-        return DataLoader(ds, batch_size=self.batch_size, shuffle=True,
-                          num_workers=self.cfg["num_workers"], pin_memory=self.cfg["pin_memory"])
+        return DataLoader(
+            self.train_ds,
+            batch_size=int(self.tcfg["batch_size"]),
+            shuffle=True,
+            num_workers=int(self.dcfg["num_workers"]),
+            pin_memory=bool(self.dcfg["pin_memory"]),
+        )
 
     def val_loader(self):
-        dss = [self._ds_one(d, "val", False) for d in self.cfg["datasets"]]
-        ds = ConcatDataset(dss) if len(dss) > 1 else dss[0]
-        return DataLoader(ds, batch_size=1, shuffle=False,
-                          num_workers=self.cfg["num_workers"], pin_memory=self.cfg["pin_memory"])
+        return DataLoader(
+            self.val_ds,
+            batch_size=1,
+            shuffle=False,
+            num_workers=int(self.dcfg["num_workers"]),
+            pin_memory=bool(self.dcfg["pin_memory"]),
+        )
 
-    def test_loader(self, dataset_name: str):
-        ds = self._ds_one(dataset_name, "test", False)
-        return DataLoader(ds, batch_size=1, shuffle=False,
-                          num_workers=self.cfg["num_workers"], pin_memory=self.cfg["pin_memory"])
+    def test_loader(self, dataset_name: str, val_tfms):
+        ds = self._make_one(dataset_name, "test", val_tfms)
+        return DataLoader(
+            ds, batch_size=1, shuffle=False,
+            num_workers=int(self.dcfg["num_workers"]),
+            pin_memory=bool(self.dcfg["pin_memory"]),
+        )

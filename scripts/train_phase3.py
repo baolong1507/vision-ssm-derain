@@ -2,6 +2,7 @@ import argparse
 from omegaconf import OmegaConf
 from src.utils.seed import seed_everything
 from src.data.datamodule import DerainDataModule
+from src.data.transforms_albu import build_transforms
 from src.models.fessm_net import FESSMNet
 from src.lit_module import LitDerain
 from src.utils.io import ensure_dir
@@ -14,9 +15,19 @@ def main(cfg_path, data_cfg_path):
 
     seed_everything(int(cfg.seed))
 
-    dm = DerainDataModule(data_cfg, batch_size=int(cfg.train.batch_size))
+    train_tfms = build_transforms(int(data_cfg.img_size), int(data_cfg.crop_size), True)
+    val_tfms   = build_transforms(int(data_cfg.img_size), int(data_cfg.crop_size), False)
+
+    dm = DerainDataModule(data_cfg, train_cfg={
+        "batch_size": int(cfg.train.batch_size),
+        "auto_split_val": True,       # 
+        "val_ratio": 0.1,             # 
+        "split_seed": int(cfg.seed),  # 
+    })
+
+    dm.setup(train_tfms, val_tfms)
     train_loader = dm.train_loader()
-    val_loader = dm.val_loader()
+    val_loader   = dm.val_loader()
 
     model = FESSMNet(
         base_ch=int(cfg.model.base_ch),
