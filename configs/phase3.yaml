@@ -23,5 +23,5 @@ model:
 
 output:
   exp_name: "phase3_fessm"
-  ckpt_dir: "outputs/phase3/checkpoints"
-  result_dir: "outputs/phase3/results"
+  ckpt_dir: "/content/drive/MyDrive/derain_project/outputs/ckpts/phase3"
+  result_dir: "/content/drive/MyDrive/derain_project/outputs/results/phase3"
