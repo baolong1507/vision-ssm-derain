@@ -25,15 +25,14 @@ Describe your key modules: hybrid spatial-frequency, SSM blocks, etc.
 | DID-Data | [dataset](https://pan.baidu.com/s/1Hvm9ctniC7PMQdKrI_lf3QdKrI_lf3Q) |
 
 ## Results
-|         | Baseline U-Net  | FESS U-Net      | FESSM           |    
-| Dataset | PSNR ↑ | SSIM ↑ | PSNR ↑ | SSIM ↑ | PSNR ↑ | SSIM ↑ |
-|---|---:|---:|
-| Rain200L | 31.83  | 0.924 |
-| Rain200H |  |  |
-| Rain1400 |  |  |
-| DID-Data |  |  |
 
-Qualitative examples are in `results/qualitative/`.
+| Dataset  | U-Net PSNR ↑ | U-Net SSIM ↑ | FESS U-Net PSNR ↑ | FESS U-Net SSIM ↑ | FESSM PSNR ↑ | FESSM SSIM ↑ |
+|---|---:|---:|---:|---:|---:|---:|
+| Rain200L | 33.03 | 0.953 |  |  |  |  |
+| Rain200H | 25.60 | 0.822 |  |  |  |  |
+| Rain1400 | 31.59 | 0.931 |  |  |  |  |
+| DID-Data | 32.96 | 0.927 |  |  |  |  |
+| Avrg     | 31.83 | 0.924 |  |  |  |  |
 
 ## Setup
 ```bash
