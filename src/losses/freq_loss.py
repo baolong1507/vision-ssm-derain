@@ -7,8 +7,8 @@ class FFTAmplitudeLoss(nn.Module):
         self.eps = eps
 
     def forward(self, pred, gt):
-        # pred/gt: (B,C,H,W) có thể đang float16 do AMP
-        with torch.amp.autocast(enabled=False):
+        # pred/gt: (B,C,H,W) float16 do AMP
+        with torch.amp.autocast(device_type=pred.device.type, enabled=False):
             pred32 = pred.float()
             gt32   = gt.float()
 
