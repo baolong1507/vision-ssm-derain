@@ -35,18 +35,42 @@ class LitDerain(pl.LightningModule):
 
     def training_step(self, batch, batch_idx):
         rain, gt = batch["rain"], batch["gt"]
+
         pred = self(rain)
-        loss = self._loss(pred, gt)
-        self.log("train/loss", loss, prog_bar=True)
+
+        if not torch.isfinite(pred).all():
+            raise RuntimeError("NaN/Inf in pred (model forward)")
+
+        pred01 = pred.clamp(0, 1)
+        gt01   = gt.clamp(0, 1)
+
+        loss = self._loss(pred01, gt01)
+
+        if not torch.isfinite(loss):
+            raise RuntimeError("NaN/Inf in loss")
+
+        self.log("train/loss", loss, prog_bar=True, on_step=True, on_epoch=True)
         return loss
+
 
     def validation_step(self, batch, batch_idx):
         rain, gt = batch["rain"], batch["gt"]
+
         pred = self(rain)
-        loss = self._loss(pred, gt)
-        p = psnr(pred, gt)
-        self.log("val/loss", loss, prog_bar=True)
-        self.log("val/psnr", p, prog_bar=True)
+        if not torch.isfinite(pred).all():
+            raise RuntimeError("NaN/Inf in pred (val forward)")
+
+        pred01 = pred.clamp(0, 1)
+        gt01   = gt.clamp(0, 1)
+
+        loss = self._loss(pred01, gt01)
+        if not torch.isfinite(loss):
+            raise RuntimeError("NaN/Inf in val loss")
+
+        p = psnr(pred01, gt01)
+
+        self.log("val/loss", loss, prog_bar=True, on_step=False, on_epoch=True)
+        self.log("val/psnr", p, prog_bar=True, on_step=False, on_epoch=True)
 
     def configure_optimizers(self):
         opt = torch.optim.AdamW(self.parameters(), lr=self.lr, weight_decay=self.weight_decay)

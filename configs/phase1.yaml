@@ -21,5 +21,5 @@ model:
 
 output:
   exp_name: "phase1_baseline_unet"
-  ckpt_dir: "outputs/phase1/checkpoints"
-  result_dir: "outputs/phase1/results"
+  ckpt_dir: "/content/drive/MyDrive/derain_project/outputs/ckpts/phase1"
+  result_dir: "/content/drive/MyDrive/derain_project/outputs/results/phase1"
