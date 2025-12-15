@@ -32,7 +32,7 @@ Describe your key modules: hybrid spatial-frequency, SSM blocks, etc.
 | Rain200H | 25.60 | 0.822 |  |  |  |  |
 | Rain1400 | 31.59 | 0.931 |  |  |  |  |
 | DID-Data | 32.96 | 0.927 |  |  |  |  |
-| Avrg     | 31.83 | 0.924 |  |  |  |  |
+| **Avrg** | **31.83** | **0.924** |  |  |  |  |
 
 ## Setup
 ```bash
