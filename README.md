@@ -15,18 +15,19 @@ This repository provides **reproducible training/evaluation** for robust image d
 (1) Input rainy image → (2) Derain network → (3) Restored output  
 Describe your key modules: hybrid spatial-frequency, SSM blocks, etc.
 
-## ataset
+## Dataset
 | Dataset | 
-|---|
-| Rain200L |
-| Rain200H |
-| Rain1400 |
-| DID-Data |
+|---|---:|
+| Rain200L |[dataset] (https://pan.baidu.com/s/1Hvm9ctniC7PMQdKrI_lf3Q)|
+| Rain200H |[dataset] (https://pan.baidu.com/s/1Hvm9ctniC7PMQdKrI_lf3Q)|
+| Rain1400 |[dataset] (https://pan.baidu.com/s/1Hvm9ctniC7PMQdKrI_lf3Q)|
+| DID-Data |[dataset] (https://pan.baidu.com/s/1Hvm9ctniC7PMQdKrI_lf3Q)|
 
 ## Results
-| Dataset | PSNR ↑ | SSIM ↑ |
+|         | Baseline U-Net  | FESS U-Net      | FESSM           |    
+| Dataset | PSNR ↑ | SSIM ↑ | PSNR ↑ | SSIM ↑ | PSNR ↑ | SSIM ↑ |
 |---|---:|---:|
-| Rain200L |  |  |
+| Rain200L | 31.83  | 0.924 |
 | Rain200H |  |  |
 | Rain1400 |  |  |
 | DID-Data |  |  |
