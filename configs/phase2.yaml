@@ -4,7 +4,7 @@ seed: 42
 train:
   max_epochs: 60
   batch_size: 10
-  lr: 2e-4
+  lr: 1e-4
   weight_decay: 1e-5
   precision: "16-mixed"
   grad_clip: 1.0
