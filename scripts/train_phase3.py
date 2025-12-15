@@ -1,4 +1,5 @@
 import argparse
+from pathlib import Path
 from omegaconf import OmegaConf
 from src.utils.seed import seed_everything
 from src.data.datamodule import DerainDataModule
@@ -7,7 +8,7 @@ from src.models.fessm_net import FESSMNet
 from src.lit_module import LitDerain
 from src.utils.io import ensure_dir
 import pytorch_lightning as pl
-from pytorch_lightning.callbacks import ModelCheckpoint
+from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor
 import torch
 torch.set_float32_matmul_precision("high")
 
@@ -52,14 +53,22 @@ def main(cfg_path, data_cfg_path):
 
     trainer = pl.Trainer(
         max_epochs=int(cfg.train.max_epochs),
-        precision=cfg.train.precision,
-        gradient_clip_val=float(cfg.train.grad_clip),
-        log_every_n_steps=int(cfg.train.log_every_n_steps),
-        callbacks=[ckpt],
-        accelerator="auto",
-        devices="auto",
+        accelerator="gpu" if torch.cuda.is_available() else "cpu",
+        devices=1,
+        precision="16-mixed",
+        callbacks=[ckpt, LearningRateMonitor(logging_interval="epoch")],
+        enable_checkpointing=True,        # <<< quan trọng
+        default_root_dir=str(Path(cfg.output.ckpt_dir).parents[0]),
+        log_every_n_steps=50,
     )
+
     trainer.fit(lit, train_loader, val_loader)
+    print("Saved ckpts to:", ckpt_dir)
+    print(list(ckpt_dir.glob("*.ckpt"))[:5])
+
+    manual = ckpt_dir / "manual_last.ckpt"
+    trainer.save_checkpoint(str(manual))
+    print("Manual checkpoint:", manual)
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
