@@ -59,4 +59,4 @@ class FESSMNet(nn.Module):
         d1 = self.up1(d2)
         d1 = self.dec1(torch.cat([d1, e1], dim=1))
         y = self.out(d1)
-        return torch.clamp(y, 0.0, 1.0)
+        return torch.sigmoid(y)
