@@ -15,6 +15,14 @@ This repository provides **reproducible training/evaluation** for robust image d
 (1) Input rainy image → (2) Derain network → (3) Restored output  
 Describe your key modules: hybrid spatial-frequency, SSM blocks, etc.
 
+## ataset
+| Dataset | 
+|---|
+| Rain200L |
+| Rain200H |
+| Rain1400 |
+| DID-Data |
+
 ## Results
 | Dataset | PSNR ↑ | SSIM ↑ |
 |---|---:|---:|
@@ -31,42 +39,35 @@ pip install -r requirements.txt
 ```
 
 ## Data preparation
+This repo **does not** redistribute datasets. Please download them from official sources and place them in the folder structure below.
 
-> **Note**: Most deraining datasets are distributed under specific licenses.
-> This repo **does not** redistribute datasets. Please download them from official sources and place them in the folder structure below.
+## Training
+### Quick start
+```bash
+python scripts/train.py --config configs/model_phaseX_ssm.yaml
+```
 
-### Recommended directory layout
+### Normal start
+```bash
+python scripts/train.py \
+  --config configs/model_phaseX_ssm.yaml \
+  --seed 42 \
+  --batch_size 12 \
+  --img_size 256 \
+  --max_epochs 80
+```
 
-Create a data root (e.g., `data/`) and organize datasets like:
-
-```text
-data/
-  Rain200L/
-    train/
-      rainy/
-      gt/
-    test/
-      rainy/
-      gt/
-  Rain200H/
-    train/
-      rainy/
-      gt/
-    test/
-      rainy/
-      gt/
-  Rain1400/
-    train/
-      rainy/
-      gt/
-    test/
-      rainy/
-      gt/
-  DID-Data/
-    train/
-      rainy/
-      gt/
-    test/
-      rainy/
-      gt/
+## Evaluation
+Evaluate a trained checkpoint on all supported test sets:
+```bash
+python scripts/eval.py \
+  --config configs/model_phaseX_ssm.yaml \
+  --ckpt results/checkpoints/best.ckpt
+```
+Evaluate a specific dataset only:
+```bash
+python scripts/eval.py \
+  --config configs/model_phase3_ssm.yaml \
+  --ckpt results/checkpoints/best.ckpt \
+  --dataset Rain200H
 ```
