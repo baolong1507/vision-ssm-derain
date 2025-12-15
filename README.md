@@ -29,3 +29,42 @@ Qualitative examples are in `results/qualitative/`.
 ```bash
 pip install -r requirements.txt
 
+## Data preparation
+
+> **Note**: Most deraining datasets are distributed under specific licenses.
+> This repo **does not** redistribute datasets. Please download them from official sources and place them in the folder structure below.
+
+### Recommended directory layout
+
+Create a data root (e.g., `data/`) and organize datasets like:
+
+```text
+data/
+  Rain200L/
+    train/
+      rainy/
+      gt/
+    test/
+      rainy/
+      gt/
+  Rain200H/
+    train/
+      rainy/
+      gt/
+    test/
+      rainy/
+      gt/
+  Rain1400/
+    train/
+      rainy/
+      gt/
+    test/
+      rainy/
+      gt/
+  DID-Data/
+    train/
+      rainy/
+      gt/
+    test/
+      rainy/
+      gt/
