@@ -28,6 +28,7 @@ Qualitative examples are in `results/qualitative/`.
 ## Setup
 ```bash
 pip install -r requirements.txt
+```
 
 ## Data preparation
 
@@ -68,3 +69,4 @@ data/
     test/
       rainy/
       gt/
+```
