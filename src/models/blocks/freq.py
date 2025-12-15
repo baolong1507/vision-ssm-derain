@@ -18,10 +18,27 @@ class FreqEnhance(nn.Module):
         )
 
     def forward(self, x):
-        # x: (B,C,H,W)
-        fft = torch.fft.rfft2(x, norm="ortho")
-        amp = torch.abs(fft)
-        # rfft2 reduces W dimension -> resize back
-        amp = F.interpolate(amp, size=x.shape[-2:], mode="bilinear", align_corners=False)
-        gate = self.proj(amp)
+        """
+        x: (B, C, H, W) - có thể fp16/bf16 do AMP
+        Trả về: (B, C, H, W) cùng dtype với x
+        """
+        orig_dtype = x.dtype
+
+        with torch.amp.autocast(device_type=x.device.type, enabled=False):
+            x32 = x.float()  # (B,C,H,W) float32
+            fft = torch.fft.rfft2(x32, norm="ortho")   
+            amp = torch.abs(fft)                       
+
+            amp = F.interpolate(
+                amp,
+                size=x32.shape[-2:],                   
+                mode="bilinear",
+                align_corners=False,
+            )
+
+            gate32 = self.proj(amp)                    
+            gate32 = torch.nan_to_num(gate32, nan=0.0, posinf=1e6, neginf=-1e6)
+
+        gate = gate32.to(dtype=orig_dtype)
         return x * (1.0 + gate)
+
