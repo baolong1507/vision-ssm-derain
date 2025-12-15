@@ -72,7 +72,7 @@ def main(cfg_path, data_cfg_path):
 
     if args.init_from:
         warm_start_from_ckpt(model, args.init_from)
-        
+
     lit = LitDerain(model=model, lr=float(cfg.train.lr),
                     weight_decay=float(cfg.train.weight_decay),
                     loss_w=dict(cfg.loss))
@@ -96,6 +96,8 @@ def main(cfg_path, data_cfg_path):
         enable_checkpointing=True,        # <<< quan trọng
         default_root_dir=str(Path(cfg.output.ckpt_dir).parents[0]),
         log_every_n_steps=50,
+        gradient_clip_val=1.0,  
+        gradient_clip_algorithm="norm",
     )
 
     trainer.fit(lit, train_loader, val_loader)
