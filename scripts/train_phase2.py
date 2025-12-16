@@ -9,6 +9,7 @@ from pytorch_lightning.utilities import rank_zero_only
 
 from src.utils.seed import seed_everything
 from src.data.datamodule import DerainDataModule
+from src.data.transforms_albu import build_transforms
 from src.lit_module import LitDerain
 from src.models.fess_unet import FESSUNet
 
@@ -207,7 +208,18 @@ def main():
 
     # ---- data ----
     dm = DerainDataModule(data_cfg=data_cfg, train_cfg=cfg, cfg=None)
-    train_tfms, val_tfms = dm.build_transforms()
+
+    img_size  = int(getattr(cfg, "img_size", 256)) if hasattr(cfg, "img_size") else 256
+    crop_size = int(getattr(cfg, "crop_size", 256)) if hasattr(cfg, "crop_size") else 256
+
+    # nếu bạn muốn lấy từ data_cfg:
+    if isinstance(data_cfg, dict):
+        img_size  = int(data_cfg.get("img_size", img_size))
+        crop_size = int(data_cfg.get("crop_size", crop_size))
+
+    train_tfms = build_transforms(img_size, crop_size, True)
+    val_tfms   = build_transforms(img_size, crop_size, False)
+
     dm.setup(train_tfms, val_tfms)
     train_loader, val_loader = dm.train_dataloader(), dm.val_dataloader()
 

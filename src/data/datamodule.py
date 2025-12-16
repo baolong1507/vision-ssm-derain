@@ -3,6 +3,7 @@ import torch
 import inspect
 from torch.utils.data import DataLoader, ConcatDataset, random_split
 from .datasets import PairedDerainDataset
+from .transforms_albu import build_transforms as build_tfms_albu
 from torch.utils.data import Subset
 
 class DerainDataModule:
@@ -11,6 +12,11 @@ class DerainDataModule:
         data_cfg: từ configs/data_config.yaml
         train_cfg: từ phase*.yaml (batch_size, val_ratio, split_seed, auto_split_val, ...)
         """
+        if data_cfg is None and cfg is not None:
+            data_cfg = cfg
+        if data_cfg is None or train_cfg is None:
+            raise ValueError("Need data_cfg (or cfg) and train_cfg")
+        
         self.dcfg = data_cfg
         self.tcfg = train_cfg
 
@@ -134,6 +140,19 @@ class DerainDataModule:
         self.train_ds = ConcatDataset(train_sets) if len(train_sets) > 1 else train_sets[0]
         self.val_ds   = ConcatDataset(val_sets)   if len(val_sets) > 1 else val_sets[0]
 
+    def build_transforms(self):
+        img_size  = int(self.dcfg.get("img_size", 256)) if isinstance(self.dcfg, dict) else 256
+        crop_size = int(self.dcfg.get("crop_size", 256)) if isinstance(self.dcfg, dict) else 256
+
+        # nếu bạn để img_size/crop_size trong train_cfg (phase yaml) thì ưu tiên train_cfg
+        img_size  = int(self.tcfg.get("img_size", img_size))
+        crop_size = int(self.tcfg.get("crop_size", crop_size))
+
+        train_tfms = build_tfms_albu(img_size, crop_size, True)
+        val_tfms   = build_tfms_albu(img_size, crop_size, False)
+
+        return train_tfms, val_tfms
+    
     def train_loader(self):
         return DataLoader(
             self.train_ds,
@@ -159,3 +178,9 @@ class DerainDataModule:
             num_workers=int(self.dcfg["num_workers"]),
             pin_memory=bool(self.dcfg["pin_memory"]),
         )
+    
+    def train_dataloader(self):
+        return self.train_loader()
+
+    def val_dataloader(self):
+        return self.val_loader()
