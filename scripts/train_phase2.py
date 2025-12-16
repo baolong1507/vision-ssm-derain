@@ -4,7 +4,7 @@ from pathlib import Path
 import torch
 import pytorch_lightning as pl
 from omegaconf import OmegaConf
-from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor
+from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor, Callback
 from pytorch_lightning.utilities import rank_zero_only
 
 from src.utils.seed import seed_everything
@@ -147,7 +147,18 @@ def resolve_ckpt_path(ckpt_dir: Path, resume: str) -> str:
         raise FileNotFoundError(f"Resume ckpt not found: {p}")
     return str(p)
 
+class StopOnNaN(Callback):
+    def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
+        # outputs thường là loss (tensor) hoặc dict có 'loss'
+        loss = None
+        if isinstance(outputs, torch.Tensor):
+            loss = outputs
+        elif isinstance(outputs, dict) and "loss" in outputs:
+            loss = outputs["loss"]
 
+        if loss is not None and (not torch.isfinite(loss).all()):
+            raise RuntimeError("NaN/Inf detected in training loss -> stopping.")
+        
 class GateWarmupCallback(pl.Callback):
     """
     Freeze gate/proj trong vài epoch đầu, rồi unfreeze.
@@ -238,11 +249,23 @@ def main():
     if precision not in ("16-mixed", "bf16-mixed", "32"):
         precision = "bf16-mixed"
 
-    callbacks = [ckpt_cb, LearningRateMonitor(logging_interval="epoch")]
+    callbacks = [
+        ckpt_cb,
+        LearningRateMonitor(logging_interval="epoch"),
+    ]
 
-    # Gate warmup (rất hiệu quả chống diverge/NaN)
-    if args.freeze_gate_epochs > 0:
-        callbacks.append(GateWarmupCallback(args.freeze_gate_epochs))
+    # Stop on NaN/Inf (portable across PL versions)
+    if args.terminate_on_nan:
+        callbacks.append(StopOnNaN())
+
+    # Gate warmup
+    if int(args.freeze_gate_epochs) > 0:
+        callbacks.append(GateWarmupCallback(int(args.freeze_gate_epochs)))
+
+    # ---- trainer ----
+    log_every_n_steps = int(getattr(cfg.train, "log_every_n_steps", 50))
+    grad_clip = float(getattr(cfg.train, "grad_clip", 0.5))
+    num_sanity = 0 if args.no_sanity else int(getattr(cfg.train, "num_sanity_val_steps", 2))
 
     trainer = pl.Trainer(
         max_epochs=int(cfg.train.max_epochs),
@@ -252,12 +275,11 @@ def main():
         callbacks=callbacks,
         enable_checkpointing=True,
         default_root_dir=str(ckpt_dir.parent),
-        log_every_n_steps=50,
-        gradient_clip_val=float(cfg.train.get("grad_clip", 0.5)),
+        log_every_n_steps=log_every_n_steps,
+        gradient_clip_val=grad_clip,
         gradient_clip_algorithm="norm",
-        num_sanity_val_steps=0 if args.no_sanity else 2,
-        terminate_on_nan=args.terminate_on_nan,
-        detect_anomaly=args.detect_anomaly,
+        num_sanity_val_steps=num_sanity,
+        detect_anomaly=bool(args.detect_anomaly),
     )
 
     ckpt_path = resolve_ckpt_path(ckpt_dir, args.resume)
