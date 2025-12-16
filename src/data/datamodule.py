@@ -6,7 +6,7 @@ from .datasets import PairedDerainDataset
 from torch.utils.data import Subset
 
 class DerainDataModule:
-    def __init__(self, data_cfg: dict, train_cfg: dict):
+    def __init__(self, data_cfg: dict, train_cfg: dict, cfg: dict):
         """
         data_cfg: từ configs/data_config.yaml
         train_cfg: từ phase*.yaml (batch_size, val_ratio, split_seed, auto_split_val, ...)

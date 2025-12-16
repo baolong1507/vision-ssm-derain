@@ -206,7 +206,7 @@ def main():
     )
 
     # ---- data ----
-    dm = DerainDataModule(cfg=data_cfg, train_cfg=cfg)
+    dm = DerainDataModule(data_cfg=data_cfg, train_cfg=cfg, cfg=None)
     train_tfms, val_tfms = dm.build_transforms()
     dm.setup(train_tfms, val_tfms)
     train_loader, val_loader = dm.train_dataloader(), dm.val_dataloader()
