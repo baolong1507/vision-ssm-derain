@@ -28,13 +28,15 @@ class FreqEnhance(nn.Module):
 
             amp = F.interpolate(amp, size=x32.shape[-2:], mode="bilinear", align_corners=False)
 
-            gate32 = self.proj(amp)  # float32
+            gate32 = self.proj(amp)
             gate32 = torch.nan_to_num(gate32, nan=0.0, posinf=1e6, neginf=-1e6)
 
-            gate32 = torch.tanh(gate32)
+            # ✅ chặn gate + giảm biên độ modulation
+            gate32 = torch.tanh(gate32)         # [-1,1]
+            alpha = 0.1                          # thử 0.05 nếu vẫn nhạy
+            out32 = x32 * (1.0 + alpha * gate32)
 
-
-            out32 = x32 * (1.0 + gate32)
             out32 = torch.nan_to_num(out32, nan=0.0, posinf=1e6, neginf=-1e6)
 
         return out32.to(dtype=orig_dtype)
+

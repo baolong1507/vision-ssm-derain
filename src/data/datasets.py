@@ -126,17 +126,12 @@ class PairedDerainDataset(Dataset):
         image_gt = _read_rgb(gt_fp)
 
         if self.transform is not None:
-            # albumentations style
-            try:
-                out = self.transform(image=image, image_gt=image_gt)
-                x = out["image"]
-                y = out["image_gt"]
-            except TypeError:
-                # fallback if user passes a custom callable
-                x, y = self.transform(image, image_gt)
+            out = self.transform(image=image, image_gt=image_gt)
+            rain_t = out["image"]
+            gt_t   = out["image_gt"]
         else:
-            # fallback: [0..1] tensor
-            x = torch.from_numpy(image).permute(2,0,1).float() / 255.0
-            y = torch.from_numpy(image_gt).permute(2,0,1).float() / 255.0
+            # fallback: convert to tensor [0,1] nếu cần
+            rain_t = torch.from_numpy(image).permute(2,0,1).float() / 255.0
+            gt_t   = torch.from_numpy(image_gt).permute(2,0,1).float() / 255.0
 
-        return {"rain": x, "gt": y, "name": inp_fp.name}
+        return {"rain": rain_t, "gt": gt_t}
