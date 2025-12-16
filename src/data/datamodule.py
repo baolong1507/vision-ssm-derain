@@ -23,6 +23,20 @@ class DerainDataModule:
         self.train_ds = None
         self.val_ds = None
 
+    def _tcfg_get(self, key, default=None):
+        # ưu tiên train.<key> nếu tồn tại
+        try:
+            if "train" in self.tcfg and key in self.tcfg.train:
+                return self.tcfg.train[key]
+        except Exception:
+            pass
+        # fallback root-level
+        try:
+            if key in self.tcfg:
+                return self.tcfg[key]
+        except Exception:
+            pass
+        return default
     def _has_val_folder(self, dataset_name: str) -> bool:
         root = Path(self.dcfg["data_root"]) / dataset_name
         sub = self.dcfg["subdirs"]
@@ -99,9 +113,9 @@ class DerainDataModule:
         return PairedDerainDataset(**kwargs)
 
     def setup(self, train_tfms, val_tfms):
-        auto_split = bool(self.tcfg.get("auto_split_val", True))
-        val_ratio  = float(self.tcfg.get("val_ratio", 0.1))
-        split_seed = int(self.tcfg.get("split_seed", 42))
+        auto_split = bool(self._tcfg_get("auto_split_val", True))
+        val_ratio  = float(self._tcfg_get("val_ratio", 0.1))
+        split_seed = int(self._tcfg_get("split_seed", 42))
 
         train_sets, val_sets = [], []
         g = torch.Generator().manual_seed(split_seed)
@@ -156,7 +170,7 @@ class DerainDataModule:
     def train_loader(self):
         return DataLoader(
             self.train_ds,
-            batch_size=int(self.tcfg["batch_size"]),
+            batch_size = int(self._tcfg_get("batch_size", 8)),
             shuffle=True,
             num_workers=int(self.dcfg["num_workers"]),
             pin_memory=bool(self.dcfg["pin_memory"]),
