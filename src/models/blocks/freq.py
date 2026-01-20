@@ -18,25 +18,10 @@ class FreqEnhance(nn.Module):
         )
 
     def forward(self, x):
-        orig_dtype = x.dtype
-
-        with torch.amp.autocast(device_type=x.device.type, enabled=False):
-            x32 = x.float()
-
-            fft = torch.fft.rfft2(x32, norm="ortho")
-            amp = torch.abs(fft)
-
-            amp = F.interpolate(amp, size=x32.shape[-2:], mode="bilinear", align_corners=False)
-
-            gate32 = self.proj(amp)
-            gate32 = torch.nan_to_num(gate32, nan=0.0, posinf=1e6, neginf=-1e6)
-
-            # ✅ chặn gate + giảm biên độ modulation
-            gate32 = torch.tanh(gate32)         # [-1,1]
-            alpha = 0.1                          # thử 0.05 nếu vẫn nhạy
-            out32 = x32 * (1.0 + alpha * gate32)
-
-            out32 = torch.nan_to_num(out32, nan=0.0, posinf=1e6, neginf=-1e6)
-
-        return out32.to(dtype=orig_dtype)
+        # x: (B,C,H,W)
+        fft = torch.fft.rfft2(x, norm="ortho")
+        amp = torch.abs(fft)
+        amp = F.interpolate(amp, size=x.shape[-2:], mode="bilinear", align_corners=False)
+        gate = self.proj(amp)
+        return x * (1.0 + gate)
 

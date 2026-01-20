@@ -271,15 +271,14 @@ def main():
         max_epochs=int(cfg.train.max_epochs),
         accelerator="gpu" if torch.cuda.is_available() else "cpu",
         devices=1,
-        precision=precision,
-        callbacks=callbacks,
+        precision=str(cfg.train.precision),
+        callbacks=[ckpt_cb, LearningRateMonitor(logging_interval="epoch")],
         enable_checkpointing=True,
         default_root_dir=str(ckpt_dir.parent),
-        log_every_n_steps=log_every_n_steps,
-        gradient_clip_val=grad_clip,
+        log_every_n_steps=int(cfg.train.get("log_every_n_steps", 20)),
+        gradient_clip_val=float(cfg.train.get("grad_clip", 0.5)),
         gradient_clip_algorithm="norm",
-        num_sanity_val_steps=num_sanity,
-        detect_anomaly=bool(args.detect_anomaly),
+        num_sanity_val_steps=2,
     )
 
     ckpt_path = resolve_ckpt_path(ckpt_dir, args.resume)
