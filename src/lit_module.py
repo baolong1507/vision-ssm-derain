@@ -1,9 +1,11 @@
 import pytorch_lightning as pl
 import torch
+
 from .losses.charbonnier import CharbonnierLoss
 from .losses.ssim import ssim as ssim_fn
 from .losses.freq_loss import FFTAmplitudeLoss
 from .metrics.psnr import psnr
+
 
 class LitDerain(pl.LightningModule):
     def __init__(self, model, lr=2e-4, weight_decay=1e-5, loss_w=None, t_max=60):
@@ -13,11 +15,11 @@ class LitDerain(pl.LightningModule):
         self.weight_decay = weight_decay
         self.loss_w = loss_w or {"w_l1": 1.0, "w_ssim": 0.0, "w_fft": 0.0}
         self.t_max = int(t_max)
-
-        self.range_mode = self.loss_w.get("range_mode", "01")  # "01" or "m11"
-
+        self.range_mode = self.loss_w.get("range_mode", "01")
         self.l1 = CharbonnierLoss()
         self.fft_loss = FFTAmplitudeLoss()
+
+        self.save_hyperparameters(ignore=["model"])
 
     def to_01(self, x):
         if self.range_mode == "m11":
@@ -27,19 +29,17 @@ class LitDerain(pl.LightningModule):
     def forward(self, x):
         return self.model(x)
 
-    def _loss(self, pred01, gt01):
+    def _loss_terms(self, pred01, gt01):
+        l1_term = self.l1(pred01, gt01)
+        ssim_term = 1.0 - ssim_fn(pred01, gt01)
+        fft_term = self.fft_loss(pred01, gt01)
+
         w1 = float(self.loss_w.get("w_l1", 1.0))
         w2 = float(self.loss_w.get("w_ssim", 0.0))
         w3 = float(self.loss_w.get("w_fft", 0.0))
 
-        loss = 0.0
-        if w1 > 0:
-            loss = loss + w1 * self.l1(pred01, gt01)
-        if w2 > 0:
-            loss = loss + w2 * (1.0 - ssim_fn(pred01, gt01))
-        if w3 > 0:
-            loss = loss + w3 * self.fft_loss(pred01, gt01)
-        return loss
+        total = w1 * l1_term + w2 * ssim_term + w3 * fft_term
+        return total, l1_term, ssim_term, fft_term
 
     def training_step(self, batch, batch_idx):
         rain, gt = batch["rain"], batch["gt"]
@@ -49,13 +49,17 @@ class LitDerain(pl.LightningModule):
             raise RuntimeError("NaN/Inf in pred (model forward)")
 
         pred01 = self.to_01(pred)
-        gt01   = self.to_01(gt)
+        gt01 = self.to_01(gt)
 
-        loss = self._loss(pred01, gt01)
+        loss, l1_term, ssim_term, fft_term = self._loss_terms(pred01, gt01)
+
         if not torch.isfinite(loss):
             raise RuntimeError("NaN/Inf in loss")
 
-        self.log("train/loss", loss, prog_bar=True, on_step=True, on_epoch=True, batch_size=rain.size(0))
+        self.log("train/loss_total", loss, prog_bar=True, on_step=True, on_epoch=True, batch_size=rain.size(0))
+        self.log("train/loss_l1", l1_term, prog_bar=False, on_step=True, on_epoch=True, batch_size=rain.size(0))
+        self.log("train/loss_ssim", ssim_term, prog_bar=False, on_step=True, on_epoch=True, batch_size=rain.size(0))
+        self.log("train/loss_fft", fft_term, prog_bar=False, on_step=True, on_epoch=True, batch_size=rain.size(0))
         return loss
 
     def validation_step(self, batch, batch_idx):
@@ -66,15 +70,22 @@ class LitDerain(pl.LightningModule):
             raise RuntimeError("NaN/Inf in pred (val forward)")
 
         pred01 = self.to_01(pred)
-        gt01   = self.to_01(gt)
+        gt01 = self.to_01(gt)
 
-        loss = self._loss(pred01, gt01)
+        loss, l1_term, ssim_term, fft_term = self._loss_terms(pred01, gt01)
+
         if not torch.isfinite(loss):
             raise RuntimeError("NaN/Inf in val loss")
 
         p = psnr(pred01, gt01)
-        self.log("val/loss", loss, prog_bar=True, on_step=False, on_epoch=True, batch_size=rain.size(0))
+        ssim_score = 1.0 - ssim_term
+
+        self.log("val/loss_total", loss, prog_bar=True, on_step=False, on_epoch=True, batch_size=rain.size(0))
+        self.log("val/loss_l1", l1_term, prog_bar=False, on_step=False, on_epoch=True, batch_size=rain.size(0))
+        self.log("val/loss_ssim", ssim_term, prog_bar=False, on_step=False, on_epoch=True, batch_size=rain.size(0))
+        self.log("val/loss_fft", fft_term, prog_bar=False, on_step=False, on_epoch=True, batch_size=rain.size(0))
         self.log("val/psnr", p, prog_bar=True, on_step=False, on_epoch=True, batch_size=rain.size(0))
+        self.log("val/ssim", ssim_score, prog_bar=True, on_step=False, on_epoch=True, batch_size=rain.size(0))
 
     def configure_optimizers(self):
         opt = torch.optim.AdamW(self.parameters(), lr=self.lr, weight_decay=self.weight_decay)

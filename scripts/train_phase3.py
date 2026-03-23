@@ -1,16 +1,22 @@
 import argparse
 from pathlib import Path
+
 from omegaconf import OmegaConf
+
 from src.utils.seed import seed_everything
 from src.data.datamodule import DerainDataModule
 from src.data.transforms_albu import build_transforms
 from src.models.fessm_net import FESSMNet
 from src.lit_module import LitDerain
 from src.utils.io import ensure_dir
+
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor
+
 import torch
+
 torch.set_float32_matmul_precision("high")
+
 
 def main(cfg_path, data_cfg_path):
     cfg = OmegaConf.load(cfg_path)
@@ -19,29 +25,40 @@ def main(cfg_path, data_cfg_path):
     seed_everything(int(cfg.seed))
 
     train_tfms = build_transforms(int(data_cfg.img_size), int(data_cfg.crop_size), True)
-    val_tfms   = build_transforms(int(data_cfg.img_size), int(data_cfg.crop_size), False)
+    val_tfms = build_transforms(int(data_cfg.img_size), int(data_cfg.crop_size), False)
 
-    dm = DerainDataModule(data_cfg, train_cfg={
-        "batch_size": int(cfg.train.batch_size),
-        "auto_split_val": True,       # 
-        "val_ratio": 0.1,             # 
-        "split_seed": int(cfg.seed),  # 
-    })
-
+    dm = DerainDataModule(
+        data_cfg,
+        train_cfg={
+            "batch_size": int(cfg.train.batch_size),
+            "auto_split_val": True,
+            "val_ratio": 0.1,
+            "split_seed": int(cfg.seed),
+        },
+    )
     dm.setup(train_tfms, val_tfms)
     train_loader = dm.train_loader()
-    val_loader   = dm.val_loader()
+    val_loader = dm.val_loader()
 
     model = FESSMNet(
         base_ch=int(cfg.model.base_ch),
         freq_ch=int(cfg.model.freq_ch),
         ssm_mode=str(cfg.model.ssm_mode),
+        use_freq=bool(cfg.model.use_freq),
+        use_ssm_bottleneck=bool(cfg.model.use_ssm_bottleneck),
+        use_ssm_decoder=bool(cfg.model.use_ssm_decoder),
     )
-    lit = LitDerain(model=model, lr=float(cfg.train.lr),
-                    weight_decay=float(cfg.train.weight_decay),
-                    loss_w=dict(cfg.loss))
+
+    lit = LitDerain(
+        model=model,
+        lr=float(cfg.train.lr),
+        weight_decay=float(cfg.train.weight_decay),
+        loss_w=dict(cfg.loss),
+        t_max=int(cfg.train.max_epochs),
+    )
 
     ckpt_dir = ensure_dir(cfg.output.ckpt_dir)
+
     ckpt = ModelCheckpoint(
         dirpath=str(ckpt_dir),
         filename="epoch{epoch:03d}-psnr{val/psnr:.2f}",
@@ -55,20 +72,22 @@ def main(cfg_path, data_cfg_path):
         max_epochs=int(cfg.train.max_epochs),
         accelerator="gpu" if torch.cuda.is_available() else "cpu",
         devices=1,
-        precision="16-mixed",
+        precision=str(cfg.train.precision),
         callbacks=[ckpt, LearningRateMonitor(logging_interval="epoch")],
-        enable_checkpointing=True,        # <<< quan trọng
+        enable_checkpointing=True,
         default_root_dir=str(Path(cfg.output.ckpt_dir).parents[0]),
-        log_every_n_steps=50,
+        log_every_n_steps=int(cfg.train.log_every_n_steps),
     )
 
     trainer.fit(lit, train_loader, val_loader)
+
     print("Saved ckpts to:", ckpt_dir)
     print(list(ckpt_dir.glob("*.ckpt"))[:5])
 
     manual = ckpt_dir / "manual_last.ckpt"
     trainer.save_checkpoint(str(manual))
     print("Manual checkpoint:", manual)
+
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
