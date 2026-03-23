@@ -1,0 +1,35 @@
+phase: "phase3"
+seed: 42
+
+train:
+  max_epochs: 80
+  batch_size: 8
+  lr: 2e-4
+  weight_decay: 1e-5
+  precision: "16-mixed"
+  grad_clip: 1.0
+  log_every_n_steps: 20
+
+loss:
+  w_l1: 1.0
+  w_ssim: 0.2
+  w_fft: 0.1
+
+# model:
+#   name: "fessm"
+#   base_ch: 48
+#   freq_ch: 16
+#   ssm_mode: "convscan"   # "convscan" (nhanh) hoặc "recurrent" (chậm hơn)
+model:
+  name: "fessm"
+  base_ch: 48
+  freq_ch: 16
+  ssm_mode: "symscan"
+  use_freq: false
+  use_ssm_decoder: true
+  use_ssm_bottleneck: true
+
+output:
+  exp_name: "phase3_fessm"
+  ckpt_dir: "/content/drive/MyDrive/derain_project/outputs/ckpts/phase3"
+  result_dir: "/content/drive/MyDrive/derain_project/outputs/results/phase3"
