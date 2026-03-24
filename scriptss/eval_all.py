@@ -1,318 +1,219 @@
 import argparse
-import json
-import math
-import re
+import csv
 from pathlib import Path
-import inspect
 
 import torch
-from torch.utils.data import DataLoader
-
 from omegaconf import OmegaConf
+from torchmetrics.functional.image import peak_signal_noise_ratio, structural_similarity_index_measure
 
-# --- project imports (assumes PYTHONPATH points to repo root) ---
-from src.lit_module import LitDerain
-from src.utils.io import ensure_dir, save_json
-from src.metrics.psnr import psnr as psnr_fn
-from src.losses.ssim import ssim as ssim_fn
-
-from src.data.datasets import PairedDerainDataset
+from src.data.datamodule import DerainDataModule
 from src.data.transforms_albu import build_transforms
-
-from src.models.unet_baseline import UNetBaseline
-from src.models.fess_unet import FESSUNet
-from src.models.fessm_net import FESSMNet
+from src.models.factory import build_model
 
 
-def pick_ckpt(ckpt_dir: Path, prefer: str = "best") -> Path:
+def _cfg_get(cfg_node, key, default=None):
+    try:
+        if cfg_node is None:
+            return default
+        if isinstance(cfg_node, dict):
+            return cfg_node.get(key, default)
+        return cfg_node.get(key, default)
+    except Exception:
+        try:
+            return getattr(cfg_node, key)
+        except Exception:
+            return default
+
+
+def _extract_xy(batch):
     """
-    prefer:
-      - "best": pick epoch*-psnr*.ckpt with highest psnr
-      - "last": pick last.ckpt
-      - path: direct path
+    Hỗ trợ nhiều kiểu batch:
+    - (x, y)
+    - (x, y, meta)
+    - {"input": x, "target": y}
+    - {"rain": x, "clean": y}
+    - {"x": x, "y": y}
     """
-    if prefer and prefer not in ("best", "last"):
-        p = Path(prefer)
-        if p.exists():
-            return p
-        raise FileNotFoundError(f"Checkpoint not found: {p}")
+    if isinstance(batch, (list, tuple)):
+        if len(batch) >= 2:
+            return batch[0], batch[1]
 
-    ckpt_dir = Path(ckpt_dir)
-    if not ckpt_dir.exists():
-        raise FileNotFoundError(f"ckpt_dir not found: {ckpt_dir}")
+    if isinstance(batch, dict):
+        if "input" in batch and "target" in batch:
+            return batch["input"], batch["target"]
+        if "rain" in batch and "clean" in batch:
+            return batch["rain"], batch["clean"]
+        if "x" in batch and "y" in batch:
+            return batch["x"], batch["y"]
 
-    if prefer == "last":
-        last = ckpt_dir / "last.ckpt"
-        if last.exists():
-            return last
-        raise FileNotFoundError(f"last.ckpt not found in {ckpt_dir}")
-
-    # prefer == "best"
-    cands = sorted(ckpt_dir.glob("*.ckpt"))
-    scored = []
-    for p in cands:
-        m = re.search(r"psnr([0-9]+\.[0-9]+)", p.name)
-        if m:
-            scored.append((float(m.group(1)), p))
-    if scored:
-        scored.sort(key=lambda x: x[0])
-        return scored[-1][1]
-
-    # fallback to last
-    last = ckpt_dir / "last.ckpt"
-    if last.exists():
-        return last
-    raise FileNotFoundError(f"No suitable ckpt found in {ckpt_dir}")
-
-
-def build_model_from_cfg(cfg):
-    name = str(cfg.model.name).lower()
-    base_ch = int(cfg.model.get("base_ch", 48))
-
-    if "unet" in name and "fess" not in name:
-        return UNetBaseline(base_ch=base_ch)
-
-    if "fess_unet" in name or ("fess" in name and "unet" in name):
-        freq_ch = int(cfg.model.get("freq_ch", 16))
-        return FESSUNet(base_ch=base_ch, freq_ch=freq_ch)
-
-    if "fessm" in name:
-        freq_ch = int(cfg.model.get("freq_ch", 16))
-        ssm_mode = str(cfg.model.get("ssm_mode", "convscan"))
-        return FESSMNet(base_ch=base_ch, freq_ch=freq_ch, ssm_mode=ssm_mode)
-
-    raise ValueError(f"Unknown model name in cfg.model.name: {cfg.model.name}")
-
-
-def make_test_dataset(data_cfg, dataset_name: str, tfms):
-    """
-    Create PairedDerainDataset for <data_root>/<dataset>/<test>/<input|target>
-    Uses signature-adaptive kwargs so it works even if your dataset class init differs.
-    """
-    root = Path(data_cfg.data_root) / dataset_name
-    sub = data_cfg.subdirs
-    split = sub.test
-    inp = sub.inp
-    gt = sub.gt
-
-    sig = inspect.signature(PairedDerainDataset.__init__).parameters
-    kwargs = {}
-
-    # root / roots
-    if "root" in sig:
-        kwargs["root"] = root
-    elif "roots" in sig:
-        kwargs["roots"] = [str(root)]
-
-    # split / mode / phase
-    if "split" in sig:
-        kwargs["split"] = split
-    elif "mode" in sig:
-        kwargs["mode"] = split
-    elif "phase" in sig:
-        kwargs["phase"] = split
-
-    # input/gt dirs
-    if "inp_dir" in sig:
-        kwargs["inp_dir"] = inp
-    if "rain_dir" in sig:
-        kwargs["rain_dir"] = inp
-    if "input_dir" in sig:
-        kwargs["input_dir"] = inp
-
-    if "gt_dir" in sig:
-        kwargs["gt_dir"] = gt
-    if "target_dir" in sig:
-        kwargs["target_dir"] = gt
-
-    # transforms
-    if "transform" in sig:
-        kwargs["transform"] = tfms
-    elif "tfms" in sig:
-        kwargs["tfms"] = tfms
-    elif "transforms" in sig:
-        kwargs["transforms"] = tfms
-
-    # optional name
-    if "dataset_name" in sig:
-        kwargs["dataset_name"] = dataset_name
-    if "name" in sig:
-        kwargs["name"] = dataset_name
-
-    # filter to signature only
-    kwargs = {k: v for k, v in kwargs.items() if k in sig}
-
-    return PairedDerainDataset(**kwargs)
+    raise ValueError(f"Unsupported batch format: {type(batch)}")
 
 
 @torch.no_grad()
-def eval_loader(lit: LitDerain, dl: DataLoader, device: torch.device, num_vis: int, vis_dir: Path, prefix: str):
-    lit.eval()
-    lit.to(device)
+def evaluate_one(cfg_path, data_cfg_path, ckpt_path, split="val", max_batches=None):
+    cfg = OmegaConf.load(cfg_path)
+    data_cfg = OmegaConf.load(data_cfg_path)
 
-    psnrs = []
-    ssims = []
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    saved = 0
-    for i, batch in enumerate(dl):
-        rain = batch["rain"].to(device)
-        gt = batch["gt"].to(device)
-        name = batch.get("name", [f"{i:04d}"])[0]
+    img_size = int(_cfg_get(data_cfg, "img_size", 256))
+    crop_size = int(_cfg_get(data_cfg, "crop_size", img_size))
 
-        pred = lit(rain)
-        # ensure [0,1] for metrics/visualization
-        pred01 = pred.clamp(0, 1)
-        gt01 = gt.clamp(0, 1)
-        rain01 = rain.clamp(0, 1)
+    train_tfms = build_transforms(img_size, crop_size, True)
+    val_tfms = build_transforms(img_size, crop_size, False)
 
-        p = psnr_fn(pred01, gt01).item()
-        s = ssim_fn(pred01, gt01).item()
-        psnrs.append(p)
-        ssims.append(s)
+    dm = DerainDataModule(
+        data_cfg=data_cfg,
+        train_cfg={
+            "batch_size": int(_cfg_get(cfg.train, "batch_size", 8)),
+            "auto_split_val": bool(_cfg_get(cfg.train, "auto_split_val", True)),
+            "val_ratio": float(_cfg_get(cfg.train, "val_ratio", 0.1)),
+            "split_seed": int(_cfg_get(cfg, "seed", 42)),
+            "img_size": img_size,
+            "crop_size": crop_size,
+        },
+        cfg=cfg,
+    )
+    dm.setup(train_tfms, val_tfms)
 
-        if saved < num_vis:
-            save_triplet_png(rain01[0], pred01[0], gt01[0], vis_dir / f"{prefix}_{saved:02d}_{name}.png")
-            saved += 1
+    if split == "train":
+        loader = dm.train_loader()
+    else:
+        loader = dm.val_loader()
 
-    mean_psnr = float(sum(psnrs) / max(1, len(psnrs)))
-    mean_ssim = float(sum(ssims) / max(1, len(ssims)))
-    return mean_psnr, mean_ssim, len(psnrs)
+    model = build_model(cfg).to(device)
+    model.eval()
+
+    ckpt = torch.load(ckpt_path, map_location=device)
+    state_dict = ckpt["state_dict"] if "state_dict" in ckpt else ckpt
+
+    # Lightning checkpoint thường có prefix "model."
+    model_state = {}
+    for k, v in state_dict.items():
+        if k.startswith("model."):
+            model_state[k[len("model."):]] = v
+        elif not k.startswith("loss_") and not k.startswith("metric_"):
+            # cho phép fallback nếu checkpoint là state_dict model thuần
+            model_state[k] = v
+
+    missing, unexpected = model.load_state_dict(model_state, strict=False)
+
+    psnr_vals = []
+    ssim_vals = []
+    loss_l1_vals = []
+
+    for bi, batch in enumerate(loader):
+        if max_batches is not None and bi >= max_batches:
+            break
+
+        x, y = _extract_xy(batch)
+        x = x.to(device, non_blocking=True)
+        y = y.to(device, non_blocking=True)
+
+        pred = model(x)
+        pred = pred.clamp(0.0, 1.0)
+        y = y.clamp(0.0, 1.0)
+
+        psnr = peak_signal_noise_ratio(pred, y, data_range=1.0)
+        ssim = structural_similarity_index_measure(pred, y, data_range=1.0)
+        l1 = torch.mean(torch.abs(pred - y))
+
+        psnr_vals.append(float(psnr.detach().cpu()))
+        ssim_vals.append(float(ssim.detach().cpu()))
+        loss_l1_vals.append(float(l1.detach().cpu()))
+
+    result = {
+        "phase": str(_cfg_get(cfg, "phase", "")),
+        "model_name": str(_cfg_get(cfg.model, "name", "")),
+        "ckpt_path": str(ckpt_path),
+        "split": split,
+        "num_batches": len(psnr_vals),
+        "psnr_mean": sum(psnr_vals) / max(len(psnr_vals), 1),
+        "ssim_mean": sum(ssim_vals) / max(len(ssim_vals), 1),
+        "l1_mean": sum(loss_l1_vals) / max(len(loss_l1_vals), 1),
+        "missing_keys": len(missing),
+        "unexpected_keys": len(unexpected),
+    }
+    return result
 
 
-def tensor_to_uint8_img(x_chw: torch.Tensor):
-    # x in [0,1], CHW
-    x = x_chw.detach().float().cpu().clamp(0, 1)
-    x = (x * 255.0).round().byte()
-    # CHW -> HWC
-    return x.permute(1, 2, 0).numpy()
-
-
-def save_triplet_png(inp_chw, pred_chw, gt_chw, out_path: Path):
-    from PIL import Image
-    inp = tensor_to_uint8_img(inp_chw)
-    pred = tensor_to_uint8_img(pred_chw)
-    gt = tensor_to_uint8_img(gt_chw)
-
-    # concat horizontally: input | output | gt
-    concat = torch.from_numpy(inp)
-    # use numpy concat for simplicity
-    import numpy as np
-    panel = np.concatenate([inp, pred, gt], axis=1)
-
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    Image.fromarray(panel).save(out_path)
-
-
-def write_csv(rows, out_csv: Path):
-    import csv
+def write_csv(rows, out_csv):
+    out_csv = Path(out_csv)
     out_csv.parent.mkdir(parents=True, exist_ok=True)
-    with open(out_csv, "w", newline="", encoding="utf-8") as f:
-        w = csv.DictWriter(f, fieldnames=["dataset", "n", "psnr", "ssim"])
-        w.writeheader()
+
+    fieldnames = [
+        "phase",
+        "model_name",
+        "split",
+        "num_batches",
+        "psnr_mean",
+        "ssim_mean",
+        "l1_mean",
+        "missing_keys",
+        "unexpected_keys",
+        "ckpt_path",
+    ]
+
+    with out_csv.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
         for r in rows:
-            w.writerow(r)
+            writer.writerow(r)
+
+
+def write_md(rows, out_md):
+    out_md = Path(out_md)
+    out_md.parent.mkdir(parents=True, exist_ok=True)
+
+    lines = []
+    lines.append("| Phase | Model | Split | Batches | PSNR | SSIM | L1 | Missing | Unexpected |")
+    lines.append("|---|---|---:|---:|---:|---:|---:|---:|---:|")
+    for r in rows:
+        lines.append(
+            f"| {r['phase']} | {r['model_name']} | {r['split']} | {r['num_batches']} | "
+            f"{r['psnr_mean']:.4f} | {r['ssim_mean']:.4f} | {r['l1_mean']:.6f} | "
+            f"{r['missing_keys']} | {r['unexpected_keys']} |"
+        )
+
+    out_md.write_text("\n".join(lines), encoding="utf-8")
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--cfg", required=True, help="configs/phase*.yaml")
-    ap.add_argument("--data", required=True, help="configs/data_config.yaml")
-    ap.add_argument("--ckpt", default="best", help="'best' | 'last' | /path/to.ckpt")
-    ap.add_argument("--num_vis", type=int, default=10, help="num visualization samples per dataset")
-    ap.add_argument("--device", default="auto", help="auto|cuda|cpu")
+    ap.add_argument("--data", default="configs/data_config.yaml")
+    ap.add_argument("--split", default="val", choices=["train", "val"])
+    ap.add_argument("--max_batches", type=int, default=None)
+
+    ap.add_argument("--cfg1", default="configs/phase1_unet.yaml")
+    ap.add_argument("--ckpt1", required=True)
+
+    ap.add_argument("--cfg2", default="configs/phase2_unet_freq.yaml")
+    ap.add_argument("--ckpt2", required=True)
+
+    ap.add_argument("--cfg3", default="configs/phase3_unet_freq_symscan.yaml")
+    ap.add_argument("--ckpt3", required=True)
+
+    ap.add_argument("--out_csv", default="outputs/eval_all_results.csv")
+    ap.add_argument("--out_md", default="outputs/eval_all_results.md")
+
     args = ap.parse_args()
 
-    cfg = OmegaConf.load(args.cfg)
-    data_cfg = OmegaConf.load(args.data)
+    rows = []
+    rows.append(evaluate_one(args.cfg1, args.data, args.ckpt1, split=args.split, max_batches=args.max_batches))
+    rows.append(evaluate_one(args.cfg2, args.data, args.ckpt2, split=args.split, max_batches=args.max_batches))
+    rows.append(evaluate_one(args.cfg3, args.data, args.ckpt3, split=args.split, max_batches=args.max_batches))
 
-    # device
-    if args.device == "auto":
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    else:
-        device = torch.device(args.device)
+    write_csv(rows, args.out_csv)
+    write_md(rows, args.out_md)
 
-    # transforms for test/val (no random aug)
-    test_tfms = build_transforms(int(data_cfg.img_size), int(data_cfg.crop_size), is_train=False)
-
-    # output dirs
-    result_dir = Path(str(cfg.output.result_dir))
-    vis_dir = result_dir / "vis_samples"
-    ensure_dir(result_dir)
-    ensure_dir(vis_dir)
-
-    # pick checkpoint
-    ckpt_dir = Path(str(cfg.output.ckpt_dir))
-    ckpt_path = pick_ckpt(ckpt_dir, args.ckpt)
-    print("Using ckpt:", ckpt_path)
-
-    # build model + load lightning module
-    model = build_model_from_cfg(cfg)
-    lit = LitDerain.load_from_checkpoint(
-        str(ckpt_path),
-        model=model,
-        lr=float(cfg.train.lr),
-        weight_decay=float(cfg.train.weight_decay),
-        loss_w=dict(cfg.loss),
-        map_location="cpu",
-    )
-
-    metrics = {
-        "phase": str(cfg.phase),
-        "ckpt": str(ckpt_path),
-        "datasets": {},
-        "overall": {},
-    }
-
-    csv_rows = []
-    total_n = 0
-    total_psnr = 0.0
-    total_ssim = 0.0
-
-    for dname in list(data_cfg.datasets):
-        ds = make_test_dataset(data_cfg, dname, test_tfms)
-        dl = DataLoader(
-            ds,
-            batch_size=1,
-            shuffle=False,
-            num_workers=int(data_cfg.num_workers),
-            pin_memory=bool(data_cfg.pin_memory),
+    print("Saved:", args.out_csv)
+    print("Saved:", args.out_md)
+    for r in rows:
+        print(
+            f"[{r['phase']}] {r['model_name']} | "
+            f"PSNR={r['psnr_mean']:.4f} | SSIM={r['ssim_mean']:.4f} | "
+            f"L1={r['l1_mean']:.6f} | batches={r['num_batches']}"
         )
-
-        mean_psnr, mean_ssim, n = eval_loader(
-            lit, dl, device=device,
-            num_vis=args.num_vis,
-            vis_dir=vis_dir,
-            prefix=dname
-        )
-
-        metrics["datasets"][dname] = {"n": n, "psnr": mean_psnr, "ssim": mean_ssim}
-        csv_rows.append({"dataset": dname, "n": n, "psnr": f"{mean_psnr:.4f}", "ssim": f"{mean_ssim:.4f}"})
-
-        total_n += n
-        total_psnr += mean_psnr * n
-        total_ssim += mean_ssim * n
-
-        print(f"[{dname}] n={n}  PSNR={mean_psnr:.3f}  SSIM={mean_ssim:.4f}")
-
-    if total_n > 0:
-        metrics["overall"] = {
-            "n": total_n,
-            "psnr": float(total_psnr / total_n),
-            "ssim": float(total_ssim / total_n),
-        }
-    else:
-        metrics["overall"] = {"n": 0, "psnr": None, "ssim": None}
-
-    # save json/csv
-    out_json = result_dir / "test_metrics.json"
-    out_csv = result_dir / "test_metrics.csv"
-    save_json(metrics, out_json)
-    write_csv(csv_rows, out_csv)
-
-    print("\nSaved:")
-    print(" -", out_json)
-    print(" -", out_csv)
-    print(" -", vis_dir)
 
 
 if __name__ == "__main__":

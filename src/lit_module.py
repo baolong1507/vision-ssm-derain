@@ -1,93 +1,221 @@
-import pytorch_lightning as pl
 import torch
+import torch.nn as nn
+import pytorch_lightning as pl
 
-from .losses.charbonnier import CharbonnierLoss
-from .losses.ssim import ssim as ssim_fn
-from .losses.freq_loss import FFTAmplitudeLoss
-from .metrics.psnr import psnr
+from torchmetrics.functional.image import peak_signal_noise_ratio, structural_similarity_index_measure
+
+
+class CharbonnierLoss(nn.Module):
+    def __init__(self, eps=1e-3):
+        super().__init__()
+        self.eps = eps
+
+    def forward(self, pred, target):
+        return torch.mean(torch.sqrt((pred - target) ** 2 + self.eps ** 2))
+
+
+class FFTAmplitudeLoss(nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, pred, target):
+        pred_fft = torch.fft.rfft2(pred, norm="ortho")
+        tgt_fft = torch.fft.rfft2(target, norm="ortho")
+        pred_amp = torch.abs(pred_fft)
+        tgt_amp = torch.abs(tgt_fft)
+        return torch.mean(torch.abs(pred_amp - tgt_amp))
 
 
 class LitDerain(pl.LightningModule):
-    def __init__(self, model, lr=2e-4, weight_decay=1e-5, loss_w=None, t_max=60):
+    def __init__(self, model, lr=2e-4, weight_decay=1e-5, loss_w=None, t_max=50):
         super().__init__()
         self.model = model
         self.lr = lr
         self.weight_decay = weight_decay
-        self.loss_w = loss_w or {"w_l1": 1.0, "w_ssim": 0.0, "w_fft": 0.0}
-        self.t_max = int(t_max)
-        self.range_mode = self.loss_w.get("range_mode", "01")
-        self.l1 = CharbonnierLoss()
-        self.fft_loss = FFTAmplitudeLoss()
+        self.t_max = t_max
+
+        self.loss_w = loss_w or {}
+        self.w_l1 = float(self.loss_w.get("w_l1", 1.0))
+        self.w_ssim = float(self.loss_w.get("w_ssim", 0.2))
+        self.w_fft = float(self.loss_w.get("w_fft", 0.0))
+
+        self.loss_l1 = CharbonnierLoss()
+        self.loss_fft = FFTAmplitudeLoss()
 
         self.save_hyperparameters(ignore=["model"])
 
-    def to_01(self, x):
-        if self.range_mode == "m11":
-            return (x.clamp(-1, 1) + 1) / 2
-        return x.clamp(0, 1)
+    # =========================
+    # Debug helpers
+    # =========================
+    def _safe_stats(self, t: torch.Tensor):
+        t_det = t.detach()
+        return {
+            "shape": tuple(t_det.shape),
+            "dtype": str(t_det.dtype),
+            "device": str(t_det.device),
+            "min": float(t_det.min().item()) if t_det.numel() > 0 else 0.0,
+            "max": float(t_det.max().item()) if t_det.numel() > 0 else 0.0,
+            "mean": float(t_det.mean().item()) if t_det.numel() > 0 else 0.0,
+            "std": float(t_det.std().item()) if t_det.numel() > 1 else 0.0,
+            "has_nan": bool(torch.isnan(t_det).any().item()),
+            "has_inf": bool(torch.isinf(t_det).any().item()),
+        }
 
+    def _print_tensor_stats(self, name: str, t: torch.Tensor, stage: str, batch_idx: int):
+        s = self._safe_stats(t)
+        print(
+            f"[{stage}] batch={batch_idx} {name}: "
+            f"shape={s['shape']} dtype={s['dtype']} device={s['device']} "
+            f"min={s['min']:.6f} max={s['max']:.6f} mean={s['mean']:.6f} std={s['std']:.6f} "
+            f"nan={s['has_nan']} inf={s['has_inf']}"
+        )
+
+    def _assert_finite_tensor(self, name: str, t: torch.Tensor, stage: str, batch_idx: int):
+        has_nan = torch.isnan(t).any()
+        has_inf = torch.isinf(t).any()
+        if has_nan or has_inf:
+            self._print_tensor_stats(name, t, stage, batch_idx)
+            raise RuntimeError(f"NaN/Inf detected in {name} during {stage} at batch_idx={batch_idx}")
+
+    def _extract_xy(self, batch):
+        """
+        Hỗ trợ nhiều kiểu batch:
+        - (x, y)
+        - (x, y, meta)
+        - {"input": x, "target": y}
+        - {"rain": x, "clean": y}
+        - {"x": x, "y": y}
+        """
+        if isinstance(batch, (list, tuple)):
+            if len(batch) >= 2:
+                return batch[0], batch[1]
+
+        if isinstance(batch, dict):
+            if "input" in batch and "target" in batch:
+                return batch["input"], batch["target"]
+            if "rain" in batch and "clean" in batch:
+                return batch["rain"], batch["clean"]
+            if "x" in batch and "y" in batch:
+                return batch["x"], batch["y"]
+
+        raise ValueError(f"Unsupported batch format: {type(batch)}")
+
+    # =========================
+    # Core logic
+    # =========================
     def forward(self, x):
         return self.model(x)
 
-    def _loss_terms(self, pred01, gt01):
-        l1_term = self.l1(pred01, gt01)
-        ssim_term = 1.0 - ssim_fn(pred01, gt01)
-        fft_term = self.fft_loss(pred01, gt01)
+    def _compute_losses_and_metrics(self, pred, y):
+        l1 = self.loss_l1(pred, y)
 
-        w1 = float(self.loss_w.get("w_l1", 1.0))
-        w2 = float(self.loss_w.get("w_ssim", 0.0))
-        w3 = float(self.loss_w.get("w_fft", 0.0))
+        ssim_val = structural_similarity_index_measure(pred, y, data_range=1.0)
+        ssim_loss = 1.0 - ssim_val
 
-        total = w1 * l1_term + w2 * ssim_term + w3 * fft_term
-        return total, l1_term, ssim_term, fft_term
+        if self.w_fft > 0:
+            fft_loss = self.loss_fft(pred, y)
+        else:
+            fft_loss = torch.zeros((), device=pred.device, dtype=pred.dtype)
 
+        total = self.w_l1 * l1 + self.w_ssim * ssim_loss + self.w_fft * fft_loss
+        psnr = peak_signal_noise_ratio(pred, y, data_range=1.0)
+
+        return {
+            "loss_total": total,
+            "loss_l1": l1,
+            "loss_ssim": ssim_loss,
+            "loss_fft": fft_loss,
+            "psnr": psnr,
+            "ssim": ssim_val,
+        }
+
+    def _shared_step(self, batch, batch_idx, stage="train"):
+        x, y = self._extract_xy(batch)
+
+        # Debug input
+        self._assert_finite_tensor("x", x, stage, batch_idx)
+        self._assert_finite_tensor("y", y, stage, batch_idx)
+
+        # Optional: print first few batches only
+        if batch_idx < 3:
+            self._print_tensor_stats("x", x, stage, batch_idx)
+            self._print_tensor_stats("y", y, stage, batch_idx)
+
+        pred = self(x)
+
+        # Debug pred
+        self._assert_finite_tensor("pred", pred, stage, batch_idx)
+        if batch_idx < 3:
+            self._print_tensor_stats("pred", pred, stage, batch_idx)
+
+        pred = pred.clamp(0.0, 1.0)
+        y = y.clamp(0.0, 1.0)
+
+        out = self._compute_losses_and_metrics(pred, y)
+
+        # Debug losses
+        for k in ["loss_total", "loss_l1", "loss_ssim", "loss_fft", "psnr", "ssim"]:
+            v = out[k]
+            if torch.isnan(v) or torch.isinf(v):
+                print(f"[{stage}] batch={batch_idx} {k} is invalid: {v}")
+                self._print_tensor_stats("x", x, stage, batch_idx)
+                self._print_tensor_stats("y", y, stage, batch_idx)
+                self._print_tensor_stats("pred", pred, stage, batch_idx)
+                raise RuntimeError(f"NaN/Inf detected in {k} during {stage} at batch_idx={batch_idx}")
+
+        return out
+
+    # =========================
+    # Lightning steps
+    # =========================
     def training_step(self, batch, batch_idx):
-        rain, gt = batch["rain"], batch["gt"]
-        pred = self(rain)
+        out = self._shared_step(batch, batch_idx, stage="train")
 
-        if not torch.isfinite(pred).all():
-            raise RuntimeError("NaN/Inf in pred (model forward)")
+        self.log("train/loss_total_step", out["loss_total"], prog_bar=False, on_step=True, on_epoch=False, batch_size=batch[0].size(0) if isinstance(batch, (list, tuple)) else None)
+        self.log("train/loss_total_epoch", out["loss_total"], prog_bar=True, on_step=False, on_epoch=True, batch_size=batch[0].size(0) if isinstance(batch, (list, tuple)) else None)
+        self.log("train/psnr", out["psnr"], prog_bar=False, on_step=False, on_epoch=True, batch_size=batch[0].size(0) if isinstance(batch, (list, tuple)) else None)
+        self.log("train/ssim", out["ssim"], prog_bar=False, on_step=False, on_epoch=True, batch_size=batch[0].size(0) if isinstance(batch, (list, tuple)) else None)
 
-        pred01 = self.to_01(pred)
-        gt01 = self.to_01(gt)
-
-        loss, l1_term, ssim_term, fft_term = self._loss_terms(pred01, gt01)
-
-        if not torch.isfinite(loss):
-            raise RuntimeError("NaN/Inf in loss")
-
-        self.log("train/loss_total", loss, prog_bar=True, on_step=True, on_epoch=True, batch_size=rain.size(0))
-        self.log("train/loss_l1", l1_term, prog_bar=False, on_step=True, on_epoch=True, batch_size=rain.size(0))
-        self.log("train/loss_ssim", ssim_term, prog_bar=False, on_step=True, on_epoch=True, batch_size=rain.size(0))
-        self.log("train/loss_fft", fft_term, prog_bar=False, on_step=True, on_epoch=True, batch_size=rain.size(0))
-        return loss
+        return out["loss_total"]
 
     def validation_step(self, batch, batch_idx):
-        rain, gt = batch["rain"], batch["gt"]
-        pred = self(rain)
+        out = self._shared_step(batch, batch_idx, stage="val")
 
-        if not torch.isfinite(pred).all():
-            raise RuntimeError("NaN/Inf in pred (val forward)")
+        self.log("val/loss_total", out["loss_total"], prog_bar=True, on_step=False, on_epoch=True, batch_size=batch[0].size(0) if isinstance(batch, (list, tuple)) else None)
+        self.log("val/psnr", out["psnr"], prog_bar=True, on_step=False, on_epoch=True, batch_size=batch[0].size(0) if isinstance(batch, (list, tuple)) else None)
+        self.log("val/ssim", out["ssim"], prog_bar=True, on_step=False, on_epoch=True, batch_size=batch[0].size(0) if isinstance(batch, (list, tuple)) else None)
 
-        pred01 = self.to_01(pred)
-        gt01 = self.to_01(gt)
+        return out["loss_total"]
 
-        loss, l1_term, ssim_term, fft_term = self._loss_terms(pred01, gt01)
+    def test_step(self, batch, batch_idx):
+        out = self._shared_step(batch, batch_idx, stage="test")
 
-        if not torch.isfinite(loss):
-            raise RuntimeError("NaN/Inf in val loss")
+        self.log("test/loss_total", out["loss_total"], prog_bar=True, on_step=False, on_epoch=True, batch_size=batch[0].size(0) if isinstance(batch, (list, tuple)) else None)
+        self.log("test/psnr", out["psnr"], prog_bar=True, on_step=False, on_epoch=True, batch_size=batch[0].size(0) if isinstance(batch, (list, tuple)) else None)
+        self.log("test/ssim", out["ssim"], prog_bar=True, on_step=False, on_epoch=True, batch_size=batch[0].size(0) if isinstance(batch, (list, tuple)) else None)
 
-        p = psnr(pred01, gt01)
-        ssim_score = 1.0 - ssim_term
+        return out["loss_total"]
 
-        self.log("val/loss_total", loss, prog_bar=True, on_step=False, on_epoch=True, batch_size=rain.size(0))
-        self.log("val/loss_l1", l1_term, prog_bar=False, on_step=False, on_epoch=True, batch_size=rain.size(0))
-        self.log("val/loss_ssim", ssim_term, prog_bar=False, on_step=False, on_epoch=True, batch_size=rain.size(0))
-        self.log("val/loss_fft", fft_term, prog_bar=False, on_step=False, on_epoch=True, batch_size=rain.size(0))
-        self.log("val/psnr", p, prog_bar=True, on_step=False, on_epoch=True, batch_size=rain.size(0))
-        self.log("val/ssim", ssim_score, prog_bar=True, on_step=False, on_epoch=True, batch_size=rain.size(0))
-
+    # =========================
+    # Optimizer
+    # =========================
     def configure_optimizers(self):
-        opt = torch.optim.AdamW(self.parameters(), lr=self.lr, weight_decay=self.weight_decay)
-        sch = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=max(1, self.t_max))
-        return {"optimizer": opt, "lr_scheduler": sch}
+        optimizer = torch.optim.AdamW(
+            self.parameters(),
+            lr=self.lr,
+            weight_decay=self.weight_decay,
+        )
+
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer,
+            T_max=self.t_max,
+        )
+
+        return {
+            "optimizer": optimizer,
+            "lr_scheduler": {
+                "scheduler": scheduler,
+                "interval": "epoch",
+                "frequency": 1,
+            },
+        }
