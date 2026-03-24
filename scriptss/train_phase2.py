@@ -291,7 +291,7 @@
 # if __name__ == "__main__":
 #     main()
 
-from .common_train import build_argparser, run_train
+from script.common_train import build_argparser, run_train
 
 
 if __name__ == "__main__":

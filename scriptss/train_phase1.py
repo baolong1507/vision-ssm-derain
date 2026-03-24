@@ -77,7 +77,7 @@
 #     main(args.cfg, args.data)
 
 
-from .common_train import build_argparser, run_train
+from scriptss.common_train import build_argparser, run_train
 
 if __name__ == "__main__":
     ap = build_argparser("configs/phase1_unet.yaml")
