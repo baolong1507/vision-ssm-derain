@@ -31,4 +31,3 @@ output:
   exp_name: "phase3_convscan_sanity"
   ckpt_dir: "/content/drive/MyDrive/derain_project/outputs/ckpts/phase3_convscan_sanity"
   result_dir: "/content/drive/MyDrive/derain_project/outputs/results/phase3_convscan_sanity"
-YAML
