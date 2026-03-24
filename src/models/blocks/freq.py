@@ -83,7 +83,7 @@ class FreqEnhance(nn.Module):
         # Sigmoid should keep it in [0,1], but clamp for extra safety
         gate = torch.clamp(gate, 0.0, 1.0)
 
-        out = x_in * (1.0 + gate)
+        out = x_in * (1.0 + 1.0 * gate)
 
         if self.debug:
             if not torch.isfinite(out).all():

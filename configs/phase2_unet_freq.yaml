@@ -2,19 +2,22 @@ phase: "phase2"
 seed: 42
 
 train:
-  max_epochs: 50
+  max_epochs: 8
   batch_size: 8
-  lr: 2e-4
+  lr: 1e-4
   weight_decay: 1e-5
-  precision: "16-mixed"
-  grad_clip: 1.0
+  precision: "32-true"
+  grad_clip: 0.5
   log_every_n_steps: 20
+  limit_train_batches: 0.15
+  limit_val_batches: 0.25
+  num_sanity_val_steps: 0
   val_ratio: 0.1
 
 loss:
   w_l1: 1.0
-  w_ssim: 0.2
-  w_fft: 0.1
+  w_ssim: 0.1
+  w_fft: 0.02
   range_mode: "01"
 
 model:
