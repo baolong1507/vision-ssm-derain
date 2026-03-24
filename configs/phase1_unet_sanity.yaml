@@ -1,0 +1,33 @@
+# phase1_unet_sanity.yaml
+phase: "phase1"
+seed: 42
+
+train:
+  max_epochs: 1
+  batch_size: 1
+  lr: 2e-4
+  weight_decay: 1e-5
+  precision: "16-mixed"
+  grad_clip: 1.0
+  log_every_n_steps: 1
+  val_ratio: 0.1
+  limit_train_batches: 5
+  limit_val_batches: 2
+  num_sanity_val_steps: 0
+
+loss:
+  w_l1: 1.0
+  w_ssim: 0.2
+  w_fft: 0.0
+  range_mode: "01"
+
+model:
+  name: "unet_base"
+  in_ch: 3
+  out_ch: 3
+  base_ch: 48
+
+output:
+  exp_name: "phase1_unet_sanity"
+  ckpt_dir: "/content/drive/MyDrive/derain_project/outputs/ckpts/phase1_unet_sanity"
+  result_dir: "/content/drive/MyDrive/derain_project/outputs/results/phase1_unet_sanity"

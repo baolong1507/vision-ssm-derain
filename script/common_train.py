@@ -3,26 +3,21 @@ from pathlib import Path
 
 from omegaconf import OmegaConf
 
+import pytorch_lightning as pl
+from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor
+import torch
+
 from src.utils.seed import seed_everything
 from src.data.datamodule import DerainDataModule
 from src.data.transforms_albu import build_transforms
-from src.models.fessm_net import FESSMNet
+from src.models.factory import build_model
 from src.lit_module import LitDerain
 from src.utils.io import ensure_dir
-
-import pytorch_lightning as pl
-from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor
-
-import torch
 
 torch.set_float32_matmul_precision("high")
 
 
 def _cfg_get(cfg_node, key, default=None):
-    """
-    Safe getter cho OmegaConf DictConfig hoặc dict thường.
-    Không crash khi thiếu key.
-    """
     try:
         if cfg_node is None:
             return default
@@ -36,7 +31,7 @@ def _cfg_get(cfg_node, key, default=None):
             return default
 
 
-def main(cfg_path, data_cfg_path):
+def run_train(cfg_path, data_cfg_path):
     cfg = OmegaConf.load(cfg_path)
     data_cfg = OmegaConf.load(data_cfg_path)
 
@@ -51,10 +46,12 @@ def main(cfg_path, data_cfg_path):
     dm = DerainDataModule(
         data_cfg=data_cfg,
         train_cfg={
-            "batch_size": int(_cfg_get(cfg.train, "batch_size", 1)),
-            "auto_split_val": True,
-            "val_ratio": 0.1,
+            "batch_size": int(_cfg_get(cfg.train, "batch_size", 8)),
+            "auto_split_val": bool(_cfg_get(cfg.train, "auto_split_val", True)),
+            "val_ratio": float(_cfg_get(cfg.train, "val_ratio", 0.1)),
             "split_seed": int(_cfg_get(cfg, "seed", 42)),
+            "img_size": img_size,
+            "crop_size": crop_size,
         },
         cfg=cfg,
     )
@@ -62,14 +59,7 @@ def main(cfg_path, data_cfg_path):
     train_loader = dm.train_loader()
     val_loader = dm.val_loader()
 
-    model = FESSMNet(
-        base_ch=int(_cfg_get(cfg.model, "base_ch", 48)),
-        freq_ch=int(_cfg_get(cfg.model, "freq_ch", 16)),
-        ssm_mode=str(_cfg_get(cfg.model, "ssm_mode", "convscan")),
-        use_freq=bool(_cfg_get(cfg.model, "use_freq", False)),
-        use_ssm_bottleneck=bool(_cfg_get(cfg.model, "use_ssm_bottleneck", True)),
-        use_ssm_decoder=bool(_cfg_get(cfg.model, "use_ssm_decoder", True)),
-    )
+    model = build_model(cfg)
 
     lit = LitDerain(
         model=model,
@@ -79,21 +69,16 @@ def main(cfg_path, data_cfg_path):
         t_max=int(_cfg_get(cfg.train, "max_epochs", 1)),
     )
 
-    ckpt_dir = ensure_dir(_cfg_get(cfg.output, "ckpt_dir", "outputs/ckpts/phase3"))
+    ckpt_dir = ensure_dir(_cfg_get(cfg.output, "ckpt_dir", "outputs/ckpts/default"))
 
     ckpt = ModelCheckpoint(
         dirpath=str(ckpt_dir),
         filename="epoch{epoch:03d}-psnr{val/psnr:.2f}",
         monitor="val/psnr",
         mode="max",
-        save_top_k=2,
+        save_top_k=int(_cfg_get(cfg.output, "save_top_k", 2)),
         save_last=True,
     )
-
-    limit_train_batches = _cfg_get(cfg.train, "limit_train_batches", 1.0)
-    limit_val_batches = _cfg_get(cfg.train, "limit_val_batches", 1.0)
-    num_sanity_val_steps = int(_cfg_get(cfg.train, "num_sanity_val_steps", 2))
-    grad_clip = float(_cfg_get(cfg.train, "grad_clip", 0.0))
 
     trainer = pl.Trainer(
         max_epochs=int(_cfg_get(cfg.train, "max_epochs", 1)),
@@ -102,41 +87,40 @@ def main(cfg_path, data_cfg_path):
         precision=str(_cfg_get(cfg.train, "precision", "16-mixed")),
         callbacks=[ckpt, LearningRateMonitor(logging_interval="epoch")],
         enable_checkpointing=True,
-        default_root_dir=str(Path(_cfg_get(cfg.output, "ckpt_dir", "outputs/ckpts/phase3")).parents[0]),
-        log_every_n_steps=int(_cfg_get(cfg.train, "log_every_n_steps", 10)),
-        gradient_clip_val=grad_clip,
-        limit_train_batches=limit_train_batches,
-        limit_val_batches=limit_val_batches,
-        num_sanity_val_steps=num_sanity_val_steps,
+        default_root_dir=str(Path(_cfg_get(cfg.output, "ckpt_dir", "outputs/ckpts/default")).parents[0]),
+        log_every_n_steps=int(_cfg_get(cfg.train, "log_every_n_steps", 20)),
+        gradient_clip_val=float(_cfg_get(cfg.train, "grad_clip", 0.0)),
+        limit_train_batches=_cfg_get(cfg.train, "limit_train_batches", 1.0),
+        limit_val_batches=_cfg_get(cfg.train, "limit_val_batches", 1.0),
+        num_sanity_val_steps=int(_cfg_get(cfg.train, "num_sanity_val_steps", 0)),
     )
 
     print("========== TRAIN CONFIG ==========")
+    print(f"phase                : {_cfg_get(cfg, 'phase', 'unknown')}")
+    print(f"model.name           : {_cfg_get(cfg.model, 'name', 'unknown')}")
     print(f"cfg_path             : {cfg_path}")
     print(f"data_cfg_path        : {data_cfg_path}")
     print(f"accelerator          : {'gpu' if torch.cuda.is_available() else 'cpu'}")
     print(f"max_epochs           : {int(_cfg_get(cfg.train, 'max_epochs', 1))}")
-    print(f"batch_size           : {int(_cfg_get(cfg.train, 'batch_size', 1))}")
-    print(f"limit_train_batches  : {limit_train_batches}")
-    print(f"limit_val_batches    : {limit_val_batches}")
-    print(f"num_sanity_val_steps : {num_sanity_val_steps}")
+    print(f"batch_size           : {int(_cfg_get(cfg.train, 'batch_size', 8))}")
+    print(f"limit_train_batches  : {_cfg_get(cfg.train, 'limit_train_batches', 1.0)}")
+    print(f"limit_val_batches    : {_cfg_get(cfg.train, 'limit_val_batches', 1.0)}")
+    print(f"num_sanity_val_steps : {int(_cfg_get(cfg.train, 'num_sanity_val_steps', 0))}")
     print(f"precision            : {str(_cfg_get(cfg.train, 'precision', '16-mixed'))}")
-    print(f"ssm_mode             : {str(_cfg_get(cfg.model, 'ssm_mode', 'convscan'))}")
-    print(f"use_freq             : {bool(_cfg_get(cfg.model, 'use_freq', False))}")
     print("==================================")
 
     trainer.fit(lit, train_loader, val_loader)
 
     print("Saved ckpts to:", ckpt_dir)
-    print(list(ckpt_dir.glob("*.ckpt"))[:5])
+    print(list(Path(ckpt_dir).glob("*.ckpt"))[:5])
 
     manual = Path(ckpt_dir) / "manual_last.ckpt"
     trainer.save_checkpoint(str(manual))
     print("Manual checkpoint:", manual)
 
 
-if __name__ == "__main__":
+def build_argparser(default_cfg):
     ap = argparse.ArgumentParser()
-    ap.add_argument("--cfg", required=True, help="Path to training config yaml")
+    ap.add_argument("--cfg", default=default_cfg, help="Path to training config yaml")
     ap.add_argument("--data", default="configs/data_config.yaml", help="Path to data config yaml")
-    args = ap.parse_args()
-    main(args.cfg, args.data)
+    return ap
