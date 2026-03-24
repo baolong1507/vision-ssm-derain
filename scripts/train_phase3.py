@@ -35,6 +35,7 @@ def main(cfg_path, data_cfg_path):
             "val_ratio": 0.1,
             "split_seed": int(cfg.seed),
         },
+        cfg=cfg,
     )
     dm.setup(train_tfms, val_tfms)
     train_loader = dm.train_loader()
