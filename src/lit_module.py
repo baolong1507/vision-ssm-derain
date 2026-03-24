@@ -152,11 +152,14 @@ class LitDerain(pl.LightningModule):
         self._check_tensor_finite(rain, f"{stage}/rain_input")
         self._check_tensor_finite(gt, f"{stage}/gt_input")
 
-        pred = self(rain)
+        # pred = self(rain)
+        with torch.amp.autocast(device_type=rain.device.type, enabled=False):
+            pred = self(rain.float())
         self._check_tensor_finite(pred, f"{stage}/pred_raw")
 
         pred01 = self.to_01(pred)
-        gt01 = self.to_01(gt)
+        # gt01 = self.to_01(gt)
+        gt01 = self.to_01(gt.float())
 
         self._check_tensor_finite(pred01, f"{stage}/pred01")
         self._check_tensor_finite(gt01, f"{stage}/gt01")
