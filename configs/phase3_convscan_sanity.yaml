@@ -19,12 +19,13 @@ model:
   name: "fessm"
   base_ch: 48
   freq_ch: 16
-  ssm_mode: "symscan"
-  use_freq: true
+  ssm_mode: "convscan"
+  use_freq: false
   use_ssm_decoder: true
   use_ssm_bottleneck: true
 
 output:
-  exp_name: "phase3_full_sanity"
-  ckpt_dir: "/content/drive/MyDrive/derain_project/outputs/ckpts/phase3_full_sanity"
-  result_dir: "/content/drive/MyDrive/derain_project/outputs/results/phase3_full_sanity"
+  exp_name: "phase3_convscan_sanity"
+  ckpt_dir: "/content/drive/MyDrive/derain_project/outputs/ckpts/phase3_convscan_sanity"
+  result_dir: "/content/drive/MyDrive/derain_project/outputs/results/phase3_convscan_sanity"
+YAML
