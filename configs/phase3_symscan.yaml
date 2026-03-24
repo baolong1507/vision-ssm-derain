@@ -33,7 +33,7 @@ model:
   use_ssm_bottleneck: true
 
 output:
-  exp_name: "phase3_fessm"
+  # exp_name: "phase3_fessm"
   exp_name: "phase3_symscan_sanity"
   # ckpt_dir: "/content/drive/MyDrive/derain_project/outputs/ckpts/phase3"
   ckpt_dir: "/content/drive/MyDrive/derain_project/outputs/ckpts/phase3_symscan_sanity"
