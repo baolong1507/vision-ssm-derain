@@ -1,221 +1,296 @@
-import torch
-import torch.nn as nn
 import pytorch_lightning as pl
+import torch
 
-from torchmetrics.functional.image import peak_signal_noise_ratio, structural_similarity_index_measure
-
-
-class CharbonnierLoss(nn.Module):
-    def __init__(self, eps=1e-3):
-        super().__init__()
-        self.eps = eps
-
-    def forward(self, pred, target):
-        return torch.mean(torch.sqrt((pred - target) ** 2 + self.eps ** 2))
-
-
-class FFTAmplitudeLoss(nn.Module):
-    def __init__(self):
-        super().__init__()
-
-    def forward(self, pred, target):
-        pred_fft = torch.fft.rfft2(pred, norm="ortho")
-        tgt_fft = torch.fft.rfft2(target, norm="ortho")
-        pred_amp = torch.abs(pred_fft)
-        tgt_amp = torch.abs(tgt_fft)
-        return torch.mean(torch.abs(pred_amp - tgt_amp))
+from .losses.charbonnier import CharbonnierLoss
+from .losses.ssim import ssim as ssim_fn
+from .losses.freq_loss import FFTAmplitudeLoss
+from .metrics.psnr import psnr
 
 
 class LitDerain(pl.LightningModule):
-    def __init__(self, model, lr=2e-4, weight_decay=1e-5, loss_w=None, t_max=50):
+    def __init__(
+        self,
+        model,
+        lr=2e-4,
+        weight_decay=1e-5,
+        loss_w=None,
+        t_max=60,
+        debug_first_n_batches=2,
+    ):
         super().__init__()
         self.model = model
         self.lr = lr
         self.weight_decay = weight_decay
-        self.t_max = t_max
+        self.loss_w = loss_w or {"w_l1": 1.0, "w_ssim": 0.0, "w_fft": 0.0}
+        self.t_max = int(t_max)
+        self.range_mode = self.loss_w.get("range_mode", "01")
+        self.debug_first_n_batches = int(debug_first_n_batches)
 
-        self.loss_w = loss_w or {}
-        self.w_l1 = float(self.loss_w.get("w_l1", 1.0))
-        self.w_ssim = float(self.loss_w.get("w_ssim", 0.2))
-        self.w_fft = float(self.loss_w.get("w_fft", 0.0))
-
-        self.loss_l1 = CharbonnierLoss()
-        self.loss_fft = FFTAmplitudeLoss()
+        self.l1 = CharbonnierLoss()
+        self.fft_loss = FFTAmplitudeLoss()
 
         self.save_hyperparameters(ignore=["model"])
 
-    # =========================
-    # Debug helpers
-    # =========================
-    def _safe_stats(self, t: torch.Tensor):
-        t_det = t.detach()
-        return {
-            "shape": tuple(t_det.shape),
-            "dtype": str(t_det.dtype),
-            "device": str(t_det.device),
-            "min": float(t_det.min().item()) if t_det.numel() > 0 else 0.0,
-            "max": float(t_det.max().item()) if t_det.numel() > 0 else 0.0,
-            "mean": float(t_det.mean().item()) if t_det.numel() > 0 else 0.0,
-            "std": float(t_det.std().item()) if t_det.numel() > 1 else 0.0,
-            "has_nan": bool(torch.isnan(t_det).any().item()),
-            "has_inf": bool(torch.isinf(t_det).any().item()),
-        }
+    def to_01(self, x):
+        if self.range_mode == "m11":
+            return (x.clamp(-1, 1) + 1.0) / 2.0
+        return x.clamp(0.0, 1.0)
 
-    def _print_tensor_stats(self, name: str, t: torch.Tensor, stage: str, batch_idx: int):
-        s = self._safe_stats(t)
-        print(
-            f"[{stage}] batch={batch_idx} {name}: "
-            f"shape={s['shape']} dtype={s['dtype']} device={s['device']} "
-            f"min={s['min']:.6f} max={s['max']:.6f} mean={s['mean']:.6f} std={s['std']:.6f} "
-            f"nan={s['has_nan']} inf={s['has_inf']}"
-        )
-
-    def _assert_finite_tensor(self, name: str, t: torch.Tensor, stage: str, batch_idx: int):
-        has_nan = torch.isnan(t).any()
-        has_inf = torch.isinf(t).any()
-        if has_nan or has_inf:
-            self._print_tensor_stats(name, t, stage, batch_idx)
-            raise RuntimeError(f"NaN/Inf detected in {name} during {stage} at batch_idx={batch_idx}")
-
-    def _extract_xy(self, batch):
-        """
-        Hỗ trợ nhiều kiểu batch:
-        - (x, y)
-        - (x, y, meta)
-        - {"input": x, "target": y}
-        - {"rain": x, "clean": y}
-        - {"x": x, "y": y}
-        """
-        if isinstance(batch, (list, tuple)):
-            if len(batch) >= 2:
-                return batch[0], batch[1]
-
-        if isinstance(batch, dict):
-            if "input" in batch and "target" in batch:
-                return batch["input"], batch["target"]
-            if "rain" in batch and "clean" in batch:
-                return batch["rain"], batch["clean"]
-            if "x" in batch and "y" in batch:
-                return batch["x"], batch["y"]
-
-        raise ValueError(f"Unsupported batch format: {type(batch)}")
-
-    # =========================
-    # Core logic
-    # =========================
     def forward(self, x):
         return self.model(x)
 
-    def _compute_losses_and_metrics(self, pred, y):
-        l1 = self.loss_l1(pred, y)
+    def _tensor_stats_str(self, x, name="tensor"):
+        if not isinstance(x, torch.Tensor):
+            return f"{name}: type={type(x)}"
 
-        ssim_val = structural_similarity_index_measure(pred, y, data_range=1.0)
-        ssim_loss = 1.0 - ssim_val
+        with torch.no_grad():
+            finite_mask = torch.isfinite(x)
+            finite_ratio = finite_mask.float().mean().item() if x.numel() > 0 else 1.0
 
-        if self.w_fft > 0:
-            fft_loss = self.loss_fft(pred, y)
+            if finite_mask.any():
+                xf = x[finite_mask]
+                min_v = xf.min().item()
+                max_v = xf.max().item()
+                mean_v = xf.mean().item()
+                std_v = xf.std().item() if xf.numel() > 1 else 0.0
+            else:
+                min_v = float("nan")
+                max_v = float("nan")
+                mean_v = float("nan")
+                std_v = float("nan")
+
+        return (
+            f"{name}: shape={tuple(x.shape)}, dtype={x.dtype}, device={x.device}, "
+            f"finite_ratio={finite_ratio:.6f}, min={min_v:.6f}, max={max_v:.6f}, "
+            f"mean={mean_v:.6f}, std={std_v:.6f}"
+        )
+
+    def _debug_batch(self, batch, batch_idx, stage):
+        if batch_idx >= self.debug_first_n_batches:
+            return
+
+        print(f"\n[DEBUG][{stage}] batch_idx={batch_idx}, batch_type={type(batch)}")
+
+        if isinstance(batch, dict):
+            print(f"[DEBUG][{stage}] batch keys = {list(batch.keys())}")
+            for k, v in batch.items():
+                if isinstance(v, torch.Tensor):
+                    print("[DEBUG][" + stage + "] " + self._tensor_stats_str(v, name=k))
+                else:
+                    print(f"[DEBUG][{stage}] {k}: type={type(v)}")
+        elif isinstance(batch, (list, tuple)):
+            print(f"[DEBUG][{stage}] batch len = {len(batch)}")
+            for i, v in enumerate(batch):
+                if isinstance(v, torch.Tensor):
+                    print("[DEBUG][" + stage + "] " + self._tensor_stats_str(v, name=f'item[{i}]'))
+                else:
+                    print(f"[DEBUG][{stage}] item[{i}]: type={type(v)}")
         else:
-            fft_loss = torch.zeros((), device=pred.device, dtype=pred.dtype)
+            print(f"[DEBUG][{stage}] unsupported batch preview type: {type(batch)}")
 
-        total = self.w_l1 * l1 + self.w_ssim * ssim_loss + self.w_fft * fft_loss
-        psnr = peak_signal_noise_ratio(pred, y, data_range=1.0)
+    def _extract_xy(self, batch):
+        # Case 1: tuple/list
+        if isinstance(batch, (list, tuple)):
+            if len(batch) < 2:
+                raise ValueError(f"Unsupported batch list/tuple length: {len(batch)}")
+            return batch[0], batch[1]
 
-        return {
-            "loss_total": total,
-            "loss_l1": l1,
-            "loss_ssim": ssim_loss,
-            "loss_fft": fft_loss,
-            "psnr": psnr,
-            "ssim": ssim_val,
-        }
+        # Case 2: dict with common key pairs
+        if isinstance(batch, dict):
+            preferred_pairs = [
+                ("rain", "gt"),
+                ("rain", "clean"),
+                ("rainy", "clean"),
+                ("input", "target"),
+                ("image", "target"),
+                ("image", "gt"),
+                ("x", "y"),
+                ("noisy", "clean"),
+                ("lr", "hr"),
+            ]
+
+            for kx, ky in preferred_pairs:
+                if kx in batch and ky in batch:
+                    return batch[kx], batch[ky]
+
+            tensor_keys = [k for k, v in batch.items() if isinstance(v, torch.Tensor)]
+            if len(tensor_keys) == 2:
+                return batch[tensor_keys[0]], batch[tensor_keys[1]]
+
+            raise ValueError(
+                f"Unsupported dict batch format. keys={list(batch.keys())}, "
+                f"tensor_keys={tensor_keys}"
+            )
+
+        raise ValueError(f"Unsupported batch format: {type(batch)}")
+
+    def _check_tensor_finite(self, x, name):
+        if not isinstance(x, torch.Tensor):
+            raise TypeError(f"{name} is not a torch.Tensor, got {type(x)}")
+
+        if not torch.isfinite(x).all():
+            msg = self._tensor_stats_str(x, name=name)
+            raise RuntimeError(f"NaN/Inf detected in {name}\n{msg}")
+
+    def _loss_terms(self, pred01, gt01):
+        l1_term = self.l1(pred01, gt01)
+        ssim_term = 1.0 - ssim_fn(pred01, gt01)
+        fft_term = self.fft_loss(pred01, gt01)
+
+        w1 = float(self.loss_w.get("w_l1", 1.0))
+        w2 = float(self.loss_w.get("w_ssim", 0.0))
+        w3 = float(self.loss_w.get("w_fft", 0.0))
+
+        total = w1 * l1_term + w2 * ssim_term + w3 * fft_term
+        return total, l1_term, ssim_term, fft_term
 
     def _shared_step(self, batch, batch_idx, stage="train"):
-        x, y = self._extract_xy(batch)
+        self._debug_batch(batch, batch_idx, stage)
 
-        # Debug input
-        self._assert_finite_tensor("x", x, stage, batch_idx)
-        self._assert_finite_tensor("y", y, stage, batch_idx)
+        rain, gt = self._extract_xy(batch)
 
-        # Optional: print first few batches only
-        if batch_idx < 3:
-            self._print_tensor_stats("x", x, stage, batch_idx)
-            self._print_tensor_stats("y", y, stage, batch_idx)
+        self._check_tensor_finite(rain, f"{stage}/rain_input")
+        self._check_tensor_finite(gt, f"{stage}/gt_input")
 
-        pred = self(x)
+        pred = self(rain)
+        self._check_tensor_finite(pred, f"{stage}/pred_raw")
 
-        # Debug pred
-        self._assert_finite_tensor("pred", pred, stage, batch_idx)
-        if batch_idx < 3:
-            self._print_tensor_stats("pred", pred, stage, batch_idx)
+        pred01 = self.to_01(pred)
+        gt01 = self.to_01(gt)
 
-        pred = pred.clamp(0.0, 1.0)
-        y = y.clamp(0.0, 1.0)
+        self._check_tensor_finite(pred01, f"{stage}/pred01")
+        self._check_tensor_finite(gt01, f"{stage}/gt01")
 
-        out = self._compute_losses_and_metrics(pred, y)
+        loss, l1_term, ssim_term, fft_term = self._loss_terms(pred01, gt01)
 
-        # Debug losses
-        for k in ["loss_total", "loss_l1", "loss_ssim", "loss_fft", "psnr", "ssim"]:
-            v = out[k]
-            if torch.isnan(v) or torch.isinf(v):
-                print(f"[{stage}] batch={batch_idx} {k} is invalid: {v}")
-                self._print_tensor_stats("x", x, stage, batch_idx)
-                self._print_tensor_stats("y", y, stage, batch_idx)
-                self._print_tensor_stats("pred", pred, stage, batch_idx)
-                raise RuntimeError(f"NaN/Inf detected in {k} during {stage} at batch_idx={batch_idx}")
+        for name, t in [
+            (f"{stage}/loss_total", loss),
+            (f"{stage}/loss_l1", l1_term),
+            (f"{stage}/loss_ssim", ssim_term),
+            (f"{stage}/loss_fft", fft_term),
+        ]:
+            self._check_tensor_finite(t, name)
 
-        return out
+        if batch_idx < self.debug_first_n_batches:
+            print("[DEBUG][" + stage + "] " + self._tensor_stats_str(rain, name="rain"))
+            print("[DEBUG][" + stage + "] " + self._tensor_stats_str(gt, name="gt"))
+            print("[DEBUG][" + stage + "] " + self._tensor_stats_str(pred, name="pred"))
+            print(
+                f"[DEBUG][{stage}] loss_total={loss.item():.6f}, "
+                f"l1={l1_term.item():.6f}, ssim_loss={ssim_term.item():.6f}, "
+                f"fft={fft_term.item():.6f}"
+            )
 
-    # =========================
-    # Lightning steps
-    # =========================
+        return rain, gt, pred01, gt01, loss, l1_term, ssim_term, fft_term
+
     def training_step(self, batch, batch_idx):
-        out = self._shared_step(batch, batch_idx, stage="train")
+        rain, gt, pred01, gt01, loss, l1_term, ssim_term, fft_term = self._shared_step(
+            batch, batch_idx, stage="train"
+        )
 
-        self.log("train/loss_total_step", out["loss_total"], prog_bar=False, on_step=True, on_epoch=False, batch_size=batch[0].size(0) if isinstance(batch, (list, tuple)) else None)
-        self.log("train/loss_total_epoch", out["loss_total"], prog_bar=True, on_step=False, on_epoch=True, batch_size=batch[0].size(0) if isinstance(batch, (list, tuple)) else None)
-        self.log("train/psnr", out["psnr"], prog_bar=False, on_step=False, on_epoch=True, batch_size=batch[0].size(0) if isinstance(batch, (list, tuple)) else None)
-        self.log("train/ssim", out["ssim"], prog_bar=False, on_step=False, on_epoch=True, batch_size=batch[0].size(0) if isinstance(batch, (list, tuple)) else None)
+        self.log(
+            "train/loss_total",
+            loss,
+            prog_bar=True,
+            on_step=True,
+            on_epoch=True,
+            batch_size=rain.size(0),
+        )
+        self.log(
+            "train/loss_l1",
+            l1_term,
+            prog_bar=False,
+            on_step=True,
+            on_epoch=True,
+            batch_size=rain.size(0),
+        )
+        self.log(
+            "train/loss_ssim",
+            ssim_term,
+            prog_bar=False,
+            on_step=True,
+            on_epoch=True,
+            batch_size=rain.size(0),
+        )
+        self.log(
+            "train/loss_fft",
+            fft_term,
+            prog_bar=False,
+            on_step=True,
+            on_epoch=True,
+            batch_size=rain.size(0),
+        )
 
-        return out["loss_total"]
+        return loss
 
     def validation_step(self, batch, batch_idx):
-        out = self._shared_step(batch, batch_idx, stage="val")
+        rain, gt, pred01, gt01, loss, l1_term, ssim_term, fft_term = self._shared_step(
+            batch, batch_idx, stage="val"
+        )
 
-        self.log("val/loss_total", out["loss_total"], prog_bar=True, on_step=False, on_epoch=True, batch_size=batch[0].size(0) if isinstance(batch, (list, tuple)) else None)
-        self.log("val/psnr", out["psnr"], prog_bar=True, on_step=False, on_epoch=True, batch_size=batch[0].size(0) if isinstance(batch, (list, tuple)) else None)
-        self.log("val/ssim", out["ssim"], prog_bar=True, on_step=False, on_epoch=True, batch_size=batch[0].size(0) if isinstance(batch, (list, tuple)) else None)
+        p = psnr(pred01, gt01)
+        ssim_score = 1.0 - ssim_term
 
-        return out["loss_total"]
+        self._check_tensor_finite(p, "val/psnr")
+        self._check_tensor_finite(ssim_score, "val/ssim")
 
-    def test_step(self, batch, batch_idx):
-        out = self._shared_step(batch, batch_idx, stage="test")
+        self.log(
+            "val/loss_total",
+            loss,
+            prog_bar=True,
+            on_step=False,
+            on_epoch=True,
+            batch_size=rain.size(0),
+        )
+        self.log(
+            "val/loss_l1",
+            l1_term,
+            prog_bar=False,
+            on_step=False,
+            on_epoch=True,
+            batch_size=rain.size(0),
+        )
+        self.log(
+            "val/loss_ssim",
+            ssim_term,
+            prog_bar=False,
+            on_step=False,
+            on_epoch=True,
+            batch_size=rain.size(0),
+        )
+        self.log(
+            "val/loss_fft",
+            fft_term,
+            prog_bar=False,
+            on_step=False,
+            on_epoch=True,
+            batch_size=rain.size(0),
+        )
+        self.log(
+            "val/psnr",
+            p,
+            prog_bar=True,
+            on_step=False,
+            on_epoch=True,
+            batch_size=rain.size(0),
+        )
+        self.log(
+            "val/ssim",
+            ssim_score,
+            prog_bar=True,
+            on_step=False,
+            on_epoch=True,
+            batch_size=rain.size(0),
+        )
 
-        self.log("test/loss_total", out["loss_total"], prog_bar=True, on_step=False, on_epoch=True, batch_size=batch[0].size(0) if isinstance(batch, (list, tuple)) else None)
-        self.log("test/psnr", out["psnr"], prog_bar=True, on_step=False, on_epoch=True, batch_size=batch[0].size(0) if isinstance(batch, (list, tuple)) else None)
-        self.log("test/ssim", out["ssim"], prog_bar=True, on_step=False, on_epoch=True, batch_size=batch[0].size(0) if isinstance(batch, (list, tuple)) else None)
-
-        return out["loss_total"]
-
-    # =========================
-    # Optimizer
-    # =========================
     def configure_optimizers(self):
-        optimizer = torch.optim.AdamW(
+        opt = torch.optim.AdamW(
             self.parameters(),
             lr=self.lr,
             weight_decay=self.weight_decay,
         )
-
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-            optimizer,
-            T_max=self.t_max,
+        sch = torch.optim.lr_scheduler.CosineAnnealingLR(
+            opt,
+            T_max=max(1, self.t_max),
         )
-
-        return {
-            "optimizer": optimizer,
-            "lr_scheduler": {
-                "scheduler": scheduler,
-                "interval": "epoch",
-                "frequency": 1,
-            },
-        }
+        return {"optimizer": opt, "lr_scheduler": sch}
